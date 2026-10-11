@@ -1,0 +1,82 @@
+# 构建 Android APK：push 或手动触发时自动打包并上传产物。
+#
+# 关键约束（来自本仓库的实际配置）：
+# - 需要 JDK 17：android/settings.gradle 用 AGP 8.9.1 + Kotlin 2.1.0，
+#   gradle-wrapper 用 Gradle 8.11.1。
+# - Flutter 版本：pubspec.lock 要求 flutter >=3.44.0。这里用 stable 通道；
+#   如需可复现构建，改成固定的 flutter-version: '3.44.0'。
+#   （pubspec.lock 被 .gitignore 忽略，CI 会重新解析依赖。）
+# - 签名：android/app/build.gradle 的 release 与 debug 两个 buildType 都引用
+#   signingConfigs.release（读取 android/key.properties）。仓库里没有密钥，
+#   所以 CI 现场生成一个「一次性 keystore」，保证 APK 可安装。
+#   ⚠️ 该 APK 的签名与官方发行版不同，无法覆盖安装 Google Play 版本；
+#   若要出正式包，请改用你自己的 keystore 并存入 GitHub Secrets。
+name: Build Android APK
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build-android:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Accept Android licenses
+        run: yes | flutter doctor --android-licenses || true
+
+      # release/debug 都走 signingConfigs.release，所以必须提供 keystore，
+      # 否则 Gradle 会以 "Keystore file not set for signing config 'release'" 失败。
+      - name: Generate a throwaway signing keystore
+        run: |
+          set -e
+          cd android/app
+          keytool -genkeypair -v \
+            -keystore ci-keystore.jks \
+            -storetype JKS \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -alias ci \
+            -storepass ci123456 -keypass ci123456 \
+            -dname "CN=ProxyPin CI, OU=CI, O=CI, L=CI, S=CI, C=CN"
+          cat > ../key.properties <<EOF
+          storePassword=ci123456
+          keyPassword=ci123456
+          keyAlias=ci
+          storeFile=${GITHUB_WORKSPACE}/android/app/ci-keystore.jks
+          EOF
+
+      - name: flutter pub get
+        run: flutter pub get
+
+      - name: Build release APK
+        run: flutter build apk --release
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: proxypin-android-apk
+          path: build/app/outputs/**/*.apk
+          if-no-files-found: error
+
+      # 打 tag（形如 v1.3.3）推送时，把 APK 附到 GitHub Release，便于手机直接下载。
+      - name: Attach APK to GitHub Release (tag pushes only)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: build/app/outputs/**/*.apk
