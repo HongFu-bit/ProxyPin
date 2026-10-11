@@ -140,6 +140,9 @@ class _MobileMcpSettingState extends State<MobileMcpSetting> {
     var samePort = (cfg.mcpPort ?? McpService.defaultPort) == newPort;
     if (sameAddress && samePort) return;
 
+    var oldAddress = cfg.mcpAddress;
+    var oldPort = cfg.mcpPort;
+    var wasRunning = _running;
     setState(() {
       _busy = true;
       _error = null;
@@ -148,14 +151,26 @@ class _MobileMcpSettingState extends State<MobileMcpSetting> {
     cfg.mcpPort = newPort;
     cfg.flushConfig();
     try {
-      if (_running) {
+      if (wasRunning) {
         await McpService.instance.stop();
         // stop() 会清空抓包索引，重启前回填当前列表，否则改地址/端口后历史请求对 AI 不可见
         McpService.instance.attach(widget.proxyServer, existing: MobileApp.container.source);
         await McpService.instance.start(cfg);
       }
     } catch (e) {
+      // 绑定失败（例如地址不可用）时回滚，避免把不可用的值持久化后每次启动都失败
+      cfg.mcpAddress = oldAddress;
+      cfg.mcpPort = oldPort;
+      cfg.flushConfig();
       _error = '${l.mcpStartFailed}: $e';
+      if (wasRunning) {
+        try {
+          McpService.instance.attach(widget.proxyServer, existing: MobileApp.container.source);
+          await McpService.instance.start(cfg);
+        } catch (_) {
+          // 用旧配置恢复也失败，保留上面的错误提示
+        }
+      }
     }
     if (mounted) {
       setState(() => _busy = false);
