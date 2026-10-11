@@ -2596,6 +2596,18 @@ abstract class AppLocalizations {
   /// **'MCP Endpoint'**
   String get mcpEndpoint;
 
+  /// No description provided for @mcpAddress.
+  ///
+  /// In en, this message translates to:
+  /// **'Address'**
+  String get mcpAddress;
+
+  /// No description provided for @mcpAddressInvalid.
+  ///
+  /// In en, this message translates to:
+  /// **'Enter a valid IP address, or leave blank for auto'**
+  String get mcpAddressInvalid;
+
   /// No description provided for @mcpPortInvalid.
   ///
   /// In en, this message translates to:

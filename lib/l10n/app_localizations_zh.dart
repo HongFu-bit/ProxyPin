@@ -1275,6 +1275,8 @@ class AppLocalizationsZh extends AppLocalizations {
 
   @override
   String get mcpEndpoint => 'MCP 服务地址';
+  String get mcpAddress => '地址';
+  String get mcpAddressInvalid => '请输入有效的 IP 地址，留空表示自动';
 
   @override
   String get mcpPortInvalid => '请输入 1024-65535 之间的有效端口';

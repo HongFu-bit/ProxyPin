@@ -24,7 +24,7 @@ import 'package:proxypin/mcp/mcp_service.dart';
 import 'package:proxypin/network/bin/server.dart';
 import 'package:proxypin/ui/configuration.dart';
 import 'package:proxypin/ui/component/mcp_docs.dart';
-import 'package:proxypin/ui/component/port_edit_dialog.dart';
+import 'package:proxypin/ui/component/mcp_endpoint_dialog.dart';
 import 'package:proxypin/ui/mobile/mobile.dart';
 import 'package:proxypin/utils/ip.dart';
 
@@ -65,11 +65,14 @@ class _MobileMcpSettingState extends State<MobileMcpSetting> {
 
   bool get _running => McpService.instance.isRunning;
 
+  /// 当前对外地址：用户自定义优先，否则用手机局域网 IP
+  String? get _host => (cfg.mcpAddress?.isNotEmpty ?? false) ? cfg.mcpAddress : _lanIp;
+
   String? get _endpoint {
-    var ip = _lanIp;
+    var host = _host;
     var port = McpService.instance.port;
-    if (ip == null || port == null) return null;
-    return 'http://$ip:$port/mcp';
+    if (host == null || port == null) return null;
+    return 'http://$host:$port/mcp';
   }
 
   Future<void> _toggle(bool enabled) async {
@@ -110,7 +113,7 @@ class _MobileMcpSettingState extends State<MobileMcpSetting> {
     try {
       if (_running) {
         await McpService.instance.stop();
-        // 同 _editPort：stop() 已清空索引，重启前回填，避免重置令牌后历史请求对 AI 不可见
+        // 同 _editEndpoint：stop() 已清空索引，重启前回填，避免重置令牌后历史请求对 AI 不可见
         McpService.instance.attach(widget.proxyServer, existing: MobileApp.container.source);
         await McpService.instance.start(cfg);
       }
@@ -120,25 +123,34 @@ class _MobileMcpSettingState extends State<MobileMcpSetting> {
     if (mounted) setState(() => _busy = false);
   }
 
-  /// 修改固定监听端口：校验通过后写入配置，运行中则重启服务使新端口生效
-  Future<void> _editPort() async {
-    var newPort = await PortEditDialog.show(
+  /// 修改监听地址与端口：写入配置，运行中则重启服务使新值生效。
+  /// 地址留空 = 按平台自动（手机局域网 IP，服务绑 0.0.0.0）。
+  Future<void> _editEndpoint() async {
+    var result = await McpEndpointDialog.show(
       context,
+      initialAddress: cfg.mcpAddress,
       initialPort: cfg.mcpPort ?? McpService.defaultPort,
       defaultPort: McpService.defaultPort,
     );
-    if (newPort == null || newPort == (cfg.mcpPort ?? McpService.defaultPort)) return;
+    if (result == null) return;
+
+    var newAddress = result.address;
+    var newPort = result.port;
+    var sameAddress = (cfg.mcpAddress ?? '') == (newAddress ?? '');
+    var samePort = (cfg.mcpPort ?? McpService.defaultPort) == newPort;
+    if (sameAddress && samePort) return;
 
     setState(() {
       _busy = true;
       _error = null;
     });
+    cfg.mcpAddress = newAddress;
     cfg.mcpPort = newPort;
     cfg.flushConfig();
     try {
       if (_running) {
         await McpService.instance.stop();
-        // stop() 会清空抓包索引，重启前回填当前列表，否则改端口后历史请求对 AI 不可见
+        // stop() 会清空抓包索引，重启前回填当前列表，否则改地址/端口后历史请求对 AI 不可见
         McpService.instance.attach(widget.proxyServer, existing: MobileApp.container.source);
         await McpService.instance.start(cfg);
       }
@@ -202,7 +214,7 @@ class _MobileMcpSettingState extends State<MobileMcpSetting> {
                 IconButton(
                   tooltip: l.edit,
                   icon: const Icon(Icons.edit_rounded, size: 19),
-                  onPressed: _busy ? null : _editPort,
+                  onPressed: _busy ? null : _editEndpoint,
                 ),
                 IconButton(
                   icon: const Icon(Icons.copy_all_rounded, size: 19),
@@ -372,19 +384,19 @@ class _MobileMcpSettingState extends State<MobileMcpSetting> {
   /// 自动探测并配置已安装的 Claude Code / Codex / Cursor / Gemini CLI。
   String _oneClickSh() {
     var token = McpService.instance.token ?? '';
-    var ip = _lanIp ?? '';
+    var host = _host ?? '';
     var port = McpService.instance.port;
     return 'curl -s -H "Authorization: Bearer $token" '
-        'http://$ip:$port/mcp/setup.sh | sh';
+        'http://$host:$port/mcp/setup.sh | sh';
   }
 
   /// 电脑端一键配置（Windows PowerShell）
   String _oneClickPs1() {
     var token = McpService.instance.token ?? '';
-    var ip = _lanIp ?? '';
+    var host = _host ?? '';
     var port = McpService.instance.port;
     return 'irm -Headers @{ Authorization = "Bearer $token" } '
-        'http://$ip:$port/mcp/setup.ps1 | iex';
+        'http://$host:$port/mcp/setup.ps1 | iex';
   }
 
   /// 通用 Streamable HTTP 配置（mcpServers JSON），覆盖 Cursor / Cline / Gemini CLI /

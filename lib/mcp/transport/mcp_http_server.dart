@@ -26,8 +26,8 @@ import 'setup_script.dart';
 
 /// MCP Streamable HTTP 传输（无状态，单 JSON 响应）。
 ///
-/// 所有平台均绑定 loopback（127.0.0.1），AI 客户端直接以 HTTP 连接（无额外桥进程）；
-/// 移动端额外要求 Bearer token。
+/// 绑定地址由调用方决定（桌面默认 loopback，移动端默认 0.0.0.0，移动端可由用户自定义），
+/// AI 客户端直接以 HTTP 连接（无额外桥进程）；移动端额外要求 Bearer token。
 ///
 /// @author wanghongen
 class McpHttpServer {
@@ -35,7 +35,7 @@ class McpHttpServer {
 
   final McpServer mcp;
 
-  /// 绑定地址：loopback（127.0.0.1）
+  /// 绑定地址：由调用方决定（桌面默认 loopback，移动端默认 0.0.0.0 / 用户自定义）
   final InternetAddress address;
 
   /// 非空时 /mcp 请求必须携带 `Authorization: Bearer <token>`
@@ -141,7 +141,7 @@ class McpHttpServer {
     // LAN 模式同样要求 Bearer token，避免脚本和服务地址被局域网内他人随意拉取。
     if (!_authorized(req)) return;
     // Host 头由客户端按实际访问地址（手机 LAN IP:端口）发送，curl/irm 一定会携带。
-    // 回退到绑定地址只会拼出电脑不可达的回环地址，因此缺失/非法时直接 400；
+    // 回退到绑定地址可能拼出电脑不可达的地址（如 0.0.0.0 / 回环），因此缺失/非法时直接 400；
     // 同时只允许主机名/IP 与端口字符，防止 Host 注入到下发的脚本里。
     var host = req.headers.host;
     if (host == null || !RegExp(r"^[A-Za-z0-9._\-]+(:\d+)?$|^\[[0-9a-fA-F:]+\](:\d+)?$").hasMatch(host)) {

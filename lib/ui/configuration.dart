@@ -119,6 +119,10 @@ class AppConfiguration {
   /// 被占用时由服务回退到系统随机端口。
   int? mcpPort;
 
+  /// MCP 服务监听/显示地址。为 null/空时按平台自动（移动端用手机局域网 IP 并绑 0.0.0.0，
+  /// 桌面用 127.0.0.1）；移动端设置页可让用户自定义为任意 IP（如 127.0.0.1 只本机可达）。
+  String? mcpAddress;
+
   AppConfiguration._();
 
   /// 单例
@@ -242,6 +246,8 @@ class AppConfiguration {
       mcpToken = config['mcpToken'] as String?;
       var port = config['mcpPort'];
       mcpPort = port is int && port > 0 && port <= 65535 ? port : null;
+      var address = config['mcpAddress'] as String?;
+      mcpAddress = (address == null || address.trim().isEmpty) ? null : address.trim();
     } catch (e) {
       logger.e(e);
     }
@@ -292,6 +298,7 @@ class AppConfiguration {
       'mcpRedactEnabled': mcpRedactEnabled,
       if (mcpToken != null) 'mcpToken': mcpToken,
       if (mcpPort != null) 'mcpPort': mcpPort,
+      if (mcpAddress != null) 'mcpAddress': mcpAddress,
     };
   }
 }

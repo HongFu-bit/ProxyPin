@@ -431,6 +431,8 @@
   "mcpSkillsReadonly": "Read-only traffic tools",
   "mcpSkillsRules": "Rules, replay & environment tools",
   "mcpEndpoint": "MCP Endpoint",
+  "mcpAddress": "Address",
+  "mcpAddressInvalid": "Enter a valid IP address, or leave blank for auto",
   "mcpPortInvalid": "Please enter a valid port between 1024 and 65535",
   "mcpAccessToken": "Access Token",
   "mcpLanGuide": "Keep this phone and your computer on the same Wi-Fi, then run one of the commands below in your computer's terminal, or paste the configuration into your AI client's MCP settings.",
