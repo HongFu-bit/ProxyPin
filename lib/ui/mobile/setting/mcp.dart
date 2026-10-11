@@ -222,30 +222,32 @@ class _MobileMcpSettingState extends State<MobileMcpSetting> {
                 ),
               ]),
             ),
-            Divider(height: 0, thickness: 0.3, color: theme.dividerColor.withValues(alpha: 0.22)),
-            ListTile(
-              dense: true,
-              leading: Icon(Icons.key_rounded, color: cs.primary),
-              title: Text(l.mcpAccessToken, style: const TextStyle(fontSize: 14)),
-              subtitle: SelectableText(
-                McpService.instance.token ?? '',
-                style: const TextStyle(fontFamily: 'monospace', fontSize: 12.5),
+            if (McpService.instance.token != null) ...[
+              Divider(height: 0, thickness: 0.3, color: theme.dividerColor.withValues(alpha: 0.22)),
+              ListTile(
+                dense: true,
+                leading: Icon(Icons.key_rounded, color: cs.primary),
+                title: Text(l.mcpAccessToken, style: const TextStyle(fontSize: 14)),
+                subtitle: SelectableText(
+                  McpService.instance.token ?? '',
+                  style: const TextStyle(fontFamily: 'monospace', fontSize: 12.5),
+                ),
+                trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+                  IconButton(
+                    tooltip: l.mcpRegenerateToken,
+                    icon: const Icon(Icons.refresh_rounded, size: 19),
+                    onPressed: _busy ? null : _regenerateToken,
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.copy_all_rounded, size: 19),
+                    onPressed: () {
+                      var t = McpService.instance.token;
+                      if (t != null) _copy(t);
+                    },
+                  ),
+                ]),
               ),
-              trailing: Row(mainAxisSize: MainAxisSize.min, children: [
-                IconButton(
-                  tooltip: l.mcpRegenerateToken,
-                  icon: const Icon(Icons.refresh_rounded, size: 19),
-                  onPressed: _busy ? null : _regenerateToken,
-                ),
-                IconButton(
-                  icon: const Icon(Icons.copy_all_rounded, size: 19),
-                  onPressed: () {
-                    var t = McpService.instance.token;
-                    if (t != null) _copy(t);
-                  },
-                ),
-              ]),
-            ),
+            ],
           ]),
           const SizedBox(height: 12),
           _card([
@@ -366,16 +368,21 @@ class _MobileMcpSettingState extends State<MobileMcpSetting> {
   }
 
   String _claudeCommand() {
-    var token = McpService.instance.token ?? '';
-    return 'claude mcp add ${McpClientNames.mobile} -s user --transport http ${_endpoint ?? ''} '
-        '--header "Authorization: Bearer $token"';
+    var base = 'claude mcp add ${McpClientNames.mobile} -s user --transport http ${_endpoint ?? ''}';
+    var token = McpService.instance.token;
+    if (token == null || token.isEmpty) return base;
+    return '$base --header "Authorization: Bearer $token"';
   }
 
   /// Codex 远程 MCP 的 token 必须通过环境变量传入（CLI 不支持 --header）
   String _codexCommand() {
-    var token = McpService.instance.token ?? '';
+    var remove = 'codex mcp remove ${McpClientNames.mobile} 2>/dev/null || true\n';
+    var token = McpService.instance.token;
+    if (token == null || token.isEmpty) {
+      return '${remove}codex mcp add ${McpClientNames.mobile} --url ${_endpoint ?? ''}';
+    }
     return 'export PROXYPIN_MOBILE_TOKEN="$token"\n'
-        'codex mcp remove ${McpClientNames.mobile} 2>/dev/null || true\n'
+        '$remove'
         'codex mcp add ${McpClientNames.mobile} --url ${_endpoint ?? ''} '
         '--bearer-token-env-var PROXYPIN_MOBILE_TOKEN';
   }
@@ -383,32 +390,35 @@ class _MobileMcpSettingState extends State<MobileMcpSetting> {
   /// 电脑端一键配置（macOS/Linux）：拉取手机下发的 shell 脚本并执行，
   /// 自动探测并配置已安装的 Claude Code / Codex / Cursor / Gemini CLI。
   String _oneClickSh() {
-    var token = McpService.instance.token ?? '';
     var host = _host ?? '';
     var port = McpService.instance.port;
-    return 'curl -s -H "Authorization: Bearer $token" '
-        'http://$host:$port/mcp/setup.sh | sh';
+    var url = 'http://$host:$port/mcp/setup.sh';
+    var token = McpService.instance.token;
+    if (token == null || token.isEmpty) return 'curl -s $url | sh';
+    return 'curl -s -H "Authorization: Bearer $token" $url | sh';
   }
 
   /// 电脑端一键配置（Windows PowerShell）
   String _oneClickPs1() {
-    var token = McpService.instance.token ?? '';
     var host = _host ?? '';
     var port = McpService.instance.port;
-    return 'irm -Headers @{ Authorization = "Bearer $token" } '
-        'http://$host:$port/mcp/setup.ps1 | iex';
+    var url = 'http://$host:$port/mcp/setup.ps1';
+    var token = McpService.instance.token;
+    if (token == null || token.isEmpty) return 'irm $url | iex';
+    return 'irm -Headers @{ Authorization = "Bearer $token" } $url | iex';
   }
 
   /// 通用 Streamable HTTP 配置（mcpServers JSON），覆盖 Cursor / Cline / Gemini CLI /
   /// Cherry Studio / VS Code Copilot 等所有支持 HTTP 传输的 MCP 客户端。
   String _genericHttpConfig() {
-    var entry = {
+    var entry = <String, dynamic>{
       'type': 'http',
       'url': _endpoint ?? '',
-      'headers': {
-        'Authorization': 'Bearer ${McpService.instance.token ?? ''}',
-      },
     };
+    var token = McpService.instance.token;
+    if (token != null && token.isNotEmpty) {
+      entry['headers'] = {'Authorization': 'Bearer $token'};
+    }
     return const JsonEncoder.withIndent('  ').convert({
       'mcpServers': {McpClientNames.mobile: entry}
     });

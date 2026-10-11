@@ -32,9 +32,10 @@ import 'package:proxypin/ui/configuration.dart';
 /// MCP 服务编排：挂载抓包索引、启停本地 HTTP 传输。
 ///
 /// 作为 [EventListener] 挂到 [ProxyServer.listeners]，与 UI 同源接收流量，
-/// 因而平台无关且不依赖具体列表容器。桌面端默认仅绑定 127.0.0.1、不做鉴权；
-/// 移动端默认绑 0.0.0.0 并要求 Bearer token，且监听地址可由用户在移动端设置页
-/// 自定义（[AppConfiguration.mcpAddress]）。所有平台都优先固定 [defaultPort]
+/// 因而平台无关且不依赖具体列表容器。默认桌面绑 127.0.0.1、移动端绑 0.0.0.0，
+/// 且监听地址可由用户在移动端设置页自定义（[AppConfiguration.mcpAddress]）。
+/// 是否需要 Bearer token 按「暴露范围」决定：绑非回环地址（局域网可达）才要求，
+/// 只绑回环（仅本机可达）则免令牌。所有平台都优先固定 [defaultPort]
 /// （移动端可经 cfg.mcpPort 自定义），被占用时才回退到系统随机端口，
 /// 保证 AI 客户端一次配置、重启 App 后无需改动。AI 客户端直接以 HTTP 连接，无需额外桥进程。
 ///
@@ -78,7 +79,7 @@ class McpService {
   /// 移动端 LAN 模式的访问 token；桌面 loopback 模式为 null
   String? get token => _http?.token;
 
-  /// 是否移动端：移动端默认绑 0.0.0.0 并要求 Bearer token（桌面默认仅 loopback）
+  /// 是否移动端（决定默认绑定地址：移动端 0.0.0.0、桌面 127.0.0.1）
   bool get lanMode => Platform.isAndroid || Platform.isIOS;
 
   /// 生成 48 位十六进制随机 token
@@ -92,6 +93,16 @@ class McpService {
     var value = address?.trim();
     if (value == null || value.isEmpty) return null;
     return InternetAddress.tryParse(value);
+  }
+
+  /// 判断是否为回环地址（仅本机可达）——据此决定是否要求 Bearer token
+  static bool _isLoopback(InternetAddress address) {
+    var raw = address.rawAddress;
+    if (address.type == InternetAddressType.IPv4) {
+      return raw.length == 4 && raw[0] == 127;
+    }
+    // IPv6 回环为 ::1
+    return raw.length == 16 && raw.take(15).every((b) => b == 0) && raw[15] == 1;
   }
 
   /// 注册抓包索引到代理服务（幂等）。[existing] 用于启用时一次性回填已抓到的请求。
@@ -130,11 +141,14 @@ class McpService {
       extraTools: actions.tools(),
     );
     // 绑定地址：优先用户自定义（cfg.mcpAddress），否则按平台自动——
-    // 移动端自动时绑 0.0.0.0 供局域网访问并要求 Bearer token；桌面仅 loopback。
-    String? token;
+    // 移动端自动时绑 0.0.0.0 供局域网访问；桌面仅 loopback。
     InternetAddress bindAddress = _parseBind(cfg.mcpAddress) ??
         (lanMode ? InternetAddress.anyIPv4 : InternetAddress.loopbackIPv4);
-    if (lanMode) {
+
+    // 令牌按「暴露范围」而非平台决定：只有绑到非回环地址（局域网可达）才要求
+    // Bearer token；只绑回环（仅本机可达）时免令牌——这样手机本机客户端也不用带。
+    String? token;
+    if (!_isLoopback(bindAddress)) {
       token = (cfg.mcpToken?.isNotEmpty ?? false) ? cfg.mcpToken : generateToken();
       cfg.mcpToken = token;
     }

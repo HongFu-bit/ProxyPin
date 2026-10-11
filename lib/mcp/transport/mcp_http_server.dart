@@ -27,7 +27,7 @@ import 'setup_script.dart';
 /// MCP Streamable HTTP 传输（无状态，单 JSON 响应）。
 ///
 /// 绑定地址由调用方决定（桌面默认 loopback，移动端默认 0.0.0.0，移动端可由用户自定义），
-/// AI 客户端直接以 HTTP 连接（无额外桥进程）；移动端额外要求 Bearer token。
+/// AI 客户端直接以 HTTP 连接（无额外桥进程）；绑到非回环地址时要求 Bearer token。
 ///
 /// @author wanghongen
 class McpHttpServer {
