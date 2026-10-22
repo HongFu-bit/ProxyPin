@@ -15,12 +15,13 @@
  */
 
 import 'dart:convert';
-import 'dart:io' show File;
+import 'dart:io' show File, Platform;
 
 import 'package:proxypin/mcp/capture/flow_store.dart';
 import 'package:proxypin/mcp/mcp_service.dart';
 import 'package:proxypin/mcp/protocol/mcp_server.dart';
 import 'package:proxypin/mcp/protocol/mcp_tool.dart';
+import 'package:proxypin/native/installed_apps.dart';
 import 'package:proxypin/network/components/manager/request_map_manager.dart';
 import 'package:proxypin/network/components/request_breakpoint.dart';
 import 'package:proxypin/network/http/http.dart';
@@ -55,8 +56,8 @@ class McpExtraTools {
 
   late final BreakpointExternalHandler breakpointHandler = _McpBreakpointHandler();
 
-  /// 每个 host 上一次生成的动态工具名，重复生成时只替换自己的工具。
-  final Map<String, List<String>> _domainToolNames = {};
+  /// 每个 host 上一次生成的动态工具，重复生成时只替换自己的工具。
+  final Map<String, _DomainToolRegistration> _domainTools = {};
 
   List<McpTool> tools() => [
         _getPendingIntercepts(),
@@ -69,6 +70,8 @@ class McpExtraTools {
         _locateApiInApk(),
         _getAuditLog(),
         _generateDomainTools(),
+        _listDomainTools(),
+        _removeDomainTools(),
         ...CryptoTools(store).tools(),
         ...WsTools().tools(),
         ...McpActiveTools(store: store).tools(),
@@ -162,17 +165,36 @@ class McpExtraTools {
           'properties': {
             'url': {'type': 'string', 'description': 'Full URL or path to look for'},
             'apk_path': {'type': 'string', 'description': 'Absolute path to the APK on this machine'},
+            'package': {
+              'type': 'string',
+              'description': 'Android only: installed package name; resolves to its base APK when apk_path is omitted',
+            },
             'max_hits': {'type': 'integer', 'description': 'Max hits, default 50, max 200'},
           },
-          'required': ['url', 'apk_path'],
+          'required': ['url'],
         },
         handler: (args) async {
           var url = args['url']?.toString() ?? '';
           if (url.isEmpty) throw ToolException('Missing required parameter: url');
-          var apkPath = args['apk_path']?.toString() ?? '';
-          if (apkPath.isEmpty) throw ToolException('Missing required parameter: apk_path');
+
+          var apkPath = args['apk_path']?.toString().trim() ?? '';
+          var packageName = args['package']?.toString().trim() ?? '';
+          if (apkPath.isEmpty && packageName.isNotEmpty) {
+            if (!Platform.isAndroid) {
+              throw ToolException('package is only supported on Android; pass apk_path instead');
+            }
+            apkPath = await InstalledApps.getApkPath(packageName) ?? '';
+            if (apkPath.isEmpty) {
+              throw ToolException('Package not found or its APK path is unavailable: $packageName. '
+                  'Verify the package name, or pass apk_path directly.');
+            }
+          }
+          if (apkPath.isEmpty) {
+            throw ToolException('Missing required parameter: apk_path (or package on Android)');
+          }
           if (!await File(apkPath).exists()) {
-            throw ToolException('APK not found: $apkPath');
+            throw ToolException('APK not found: "$apkPath". Pass an absolute path readable by the app '
+                '(e.g. /sdcard/Download/app.apk), or pass package=<packageName> on Android.');
           }
           try {
             return await ApkStringLocator.locate(
@@ -207,7 +229,9 @@ class McpExtraTools {
             'enabled': log.isEnabled,
             'count': entries.length,
             'entries': entries,
-            if (!log.isEnabled) 'note': 'Audit logging is currently disabled; these are previously recorded entries.',
+            if (!log.isEnabled)
+              'note': 'Audit logging is currently disabled; these are previously recorded entries. '
+                  'Enable it in ProxyPin → MCP settings to record new tool calls.',
           };
         },
       );
@@ -298,20 +322,109 @@ class McpExtraTools {
             maxTools: maxTools,
           );
 
-          var previous = _domainToolNames.remove(host) ?? const <String>[];
-          server.removeDynamicTools((tool) => previous.contains(tool.name));
+          var previous = _domainTools.remove(host);
+          if (previous != null) {
+            server.removeDynamicTools((tool) => previous.names.contains(tool.name));
+          }
           var registered = server.registerTools(result.tools);
-          _domainToolNames[host] = result.tools.map((t) => t.name).toList();
+          _domainTools[host] = _DomainToolRegistration(
+            host: host,
+            prefix: result.prefix,
+            names: result.tools.map((t) => t.name).toList(),
+            createdAtMs: DateTime.now().millisecondsSinceEpoch,
+          );
 
           return {
             'host': host,
             'prefix': result.prefix,
             'registered': registered,
-            'replaced': previous.length,
+            'replaced': previous?.names.length ?? 0,
+            'persisted': false,
             'tools': result.endpoints,
             'warnings': result.warnings,
-            'note': 'Generated tools send real requests with the captured headers. Call tools/list again to see them; '
-                'they disappear when the app restarts.',
+            'note': 'Generated tools send real requests with the captured headers and are kept in memory only '
+                '(persisted=false): they disappear when the app restarts. Call tools/list again to see them; '
+                'use list_domain_tools / remove_domain_tools to audit or unregister them.',
+          };
+        },
+      );
+
+  McpTool _listDomainTools() => McpTool(
+        name: 'list_domain_tools',
+        description: 'List the dynamic per-host tools registered by generate_domain_tools in this app session. '
+            'Each entry has host, name prefix, createdAtMs and tool names. These tools are in-memory only '
+            '(persisted=false) and disappear when the app restarts.',
+        inputSchema: {
+          'type': 'object',
+          'properties': {
+            'host': {'type': 'string', 'description': 'Optional exact host filter (as passed to generate_domain_tools)'},
+            'prefix': {'type': 'string', 'description': 'Optional exact tool-name prefix filter'},
+          },
+        },
+        handler: (args) async {
+          var host = args['host']?.toString().trim();
+          var prefix = args['prefix']?.toString().trim();
+          var matched = _domainTools.values.where((registration) {
+            if (host != null && host.isNotEmpty && registration.host != host) return false;
+            if (prefix != null && prefix.isNotEmpty && registration.prefix != prefix) return false;
+            return true;
+          }).toList(growable: false)
+            ..sort((a, b) => a.createdAtMs.compareTo(b.createdAtMs));
+
+          return {
+            'count': matched.length,
+            'persisted': false,
+            'tools': matched.map((registration) => registration.toJson()).toList(growable: false),
+            if (matched.isEmpty)
+              'note': 'No dynamic domain tools are registered in this session; call generate_domain_tools first.',
+          };
+        },
+      );
+
+  McpTool _removeDomainTools() => McpTool(
+        name: 'remove_domain_tools',
+        description: 'Unregister dynamic tools created by generate_domain_tools. Select by host or prefix, '
+            'or pass all=true to remove every generated tool. Built-in tools are never affected. '
+            'Generated tools are in-memory only, so this is the only way to remove them before an app restart.',
+        inputSchema: {
+          'type': 'object',
+          'properties': {
+            'host': {'type': 'string', 'description': 'Exact host used when the tools were generated'},
+            'prefix': {'type': 'string', 'description': 'Exact tool-name prefix'},
+            'all': {'type': 'boolean', 'description': 'Remove all generated domain tools'},
+          },
+        },
+        handler: (args) async {
+          var all = args['all'] == true || args['all']?.toString().toLowerCase() == 'true';
+          var host = args['host']?.toString().trim();
+          var prefix = args['prefix']?.toString().trim();
+          if (!all && (host == null || host.isEmpty) && (prefix == null || prefix.isEmpty)) {
+            throw ToolException('Specify host, prefix, or all=true');
+          }
+
+          var server = McpService.instance.server;
+          if (server == null) throw ToolException('MCP server is not running');
+
+          var selected = _domainTools.values.where((registration) {
+            if (all) return true;
+            return (host != null && host.isNotEmpty && registration.host == host) ||
+                (prefix != null && prefix.isNotEmpty && registration.prefix == prefix);
+          }).toList(growable: false);
+
+          var removedTools = <String>[];
+          for (var registration in selected) {
+            server.removeDynamicTools((tool) => registration.names.contains(tool.name));
+            _domainTools.remove(registration.host);
+            removedTools.addAll(registration.names);
+          }
+
+          return {
+            'removed': selected.length,
+            'removedTools': removedTools.length,
+            'hosts': selected.map((registration) => registration.host).toList(growable: false),
+            'remaining': _domainTools.length,
+            'persisted': false,
+            if (selected.isEmpty) 'note': 'No generated domain tools matched the filter.',
           };
         },
       );
@@ -419,6 +532,7 @@ class McpExtraTools {
           'properties': {
             'host': {'type': 'string', 'description': 'Host substring, same semantics as list_flows'},
             'path': {'type': 'string', 'description': 'Optional path exact/prefix filter'},
+            'method': {'type': 'string', 'description': 'Optional HTTP method filter, e.g. POST'},
             'sample_limit': {'type': 'integer', 'description': 'Max samples, default 20, max 50'},
             'secret': {'type': 'string', 'description': 'Optional candidate secret for salted/HMAC attempts'},
             'history_id': {
@@ -432,6 +546,7 @@ class McpExtraTools {
           var host = args['host']?.toString() ?? '';
           if (host.isEmpty) throw ToolException('Missing required parameter: host');
           var path = args['path']?.toString();
+          var method = args['method']?.toString().trim().toUpperCase();
           var limit = _intOr(args['sample_limit'], 20).clamp(2, 50);
           var historyId = _intOrNull(args['history_id']);
 
@@ -442,6 +557,10 @@ class McpExtraTools {
             flows = store.query(limit: 100, host: host);
           }
 
+          if (method != null && method.isNotEmpty) {
+            flows = flows.where((flow) => flow.method.name == method).toList(growable: false);
+          }
+
           if (path != null && path.isNotEmpty) {
             final prefix = path;
             flows = flows
@@ -449,16 +568,52 @@ class McpExtraTools {
                 .toList(growable: false);
           }
 
-          if (flows.length < 2) {
+          // 同一 host 下往往有多种接口；按 method+path 分组，只分析样本最多的那个端点，
+          // 否则不同接口的字段会被混在一起，稳定/变化字段的结论不可用。
+          var groups = <String, List<HttpRequest>>{};
+          for (var flow in flows) {
+            groups.putIfAbsent('${flow.method.name} ${flow.path}', () => []).add(flow);
+          }
+          var endpoints = groups.entries.toList()
+            ..sort((a, b) => b.value.length.compareTo(a.value.length));
+
+          if (endpoints.isEmpty || endpoints.first.value.length < 2) {
             return {
-              'samples': flows.length,
-              'note':
-                  'need at least 2 requests to the same endpoint; capture more traffic or widen the host/path filter',
+              'samples': endpoints.isEmpty ? 0 : endpoints.first.value.length,
+              'endpoints': _signatureEndpoints(endpoints),
+              'note': 'need at least 2 requests to the same method+path endpoint; '
+                  'capture more traffic, or set method/path to the endpoint you want',
             };
           }
-          return SignatureAnalyzer.analyze(flows, sampleLimit: limit, secret: args['secret']?.toString());
+
+          var selected = endpoints.first;
+          var result = SignatureAnalyzer.analyze(
+            selected.value,
+            sampleLimit: limit,
+            secret: args['secret']?.toString(),
+          );
+          result['scope'] = {
+            'method': selected.value.first.method.name,
+            'path': selected.value.first.path,
+            'sampleCount': selected.value.length,
+            'totalMatched': flows.length,
+            'endpointCount': endpoints.length,
+            'excludedEndpoints': _signatureEndpoints(endpoints.skip(1).take(10)),
+          };
+          return result;
         },
       );
+
+  List<Map<String, dynamic>> _signatureEndpoints(Iterable<MapEntry<String, List<HttpRequest>>> entries) {
+    return entries
+        .take(10)
+        .map((entry) => {
+              'method': entry.value.first.method.name,
+              'path': entry.value.first.path,
+              'samples': entry.value.length,
+            })
+        .toList(growable: false);
+  }
 
   McpTool _generateContract() => McpTool(
         name: 'generate_api_contract',
@@ -722,4 +877,26 @@ class _McpBreakpointHandler implements BreakpointExternalHandler {
     if (body != null) response.body = utf8.encode(body);
     return response;
   }
+}
+
+class _DomainToolRegistration {
+  _DomainToolRegistration({
+    required this.host,
+    required this.prefix,
+    required this.names,
+    required this.createdAtMs,
+  });
+
+  final String host;
+  final String prefix;
+  final List<String> names;
+  final int createdAtMs;
+
+  Map<String, dynamic> toJson() => {
+        'host': host,
+        'prefix': prefix,
+        'count': names.length,
+        'tools': names,
+        'createdAtMs': createdAtMs,
+      };
 }

@@ -193,7 +193,8 @@ class McpActiveTools {
   McpTool _scanCrossUser() => McpTool(
         name: 'scan_cross_user',
         description:
-            'IDOR/越权扫描: iterate an integer id parameter over a range, send each value at a bounded rate, and '
+            'IDOR / broken access control scan: iterate an integer id parameter over a range, send each value at a '
+            'bounded rate, and '
             'flag responses that look like another user\'s data (2xx, non-empty, similar size to the baseline). '
             'Heuristic only — confirm suspects manually. Range is capped at 100 values.',
         inputSchema: {

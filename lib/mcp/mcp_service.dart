@@ -232,6 +232,8 @@ class McpService {
       }
       logger.i('MCP service started on ${bindAddress.address}:${_http!.port}');
       // 交互式断点：MCP 与 UI 共享同一批挂起请求，谁先处置谁生效
+      InterceptQueue.instance.timeout =
+          Duration(seconds: AppConfiguration.normalizeBreakpointTimeout(cfg.mcpBreakpointTimeoutSec));
       _breakpointHandler = extras.breakpointHandler;
       RequestBreakpointInterceptor.externalHandler = _breakpointHandler;
       // 移动端可按需启动悬浮窗前台服务，避免 App 退到后台后被系统冻结

@@ -19,6 +19,11 @@ class InstalledApps {
     return _methodChannel
         .invokeMethod<Map>('getAppInfo', {"packageName": packageName}).then((value) => AppInfo.formJson(value!));
   }
+
+  /// Android: resolve an installed package to its base APK path; null when unavailable.
+  static Future<String?> getApkPath(String packageName) {
+    return _methodChannel.invokeMethod<String>('getApkPath', {"packageName": packageName});
+  }
 }
 
 class AppInfo {

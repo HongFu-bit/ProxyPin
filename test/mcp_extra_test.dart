@@ -21,9 +21,11 @@ import 'package:proxypin/mcp/extra/offline_mock.dart';
 import 'package:proxypin/mcp/extra/protobuf_decoder.dart';
 import 'package:proxypin/mcp/extra/signature_analyzer.dart';
 import 'package:proxypin/mcp/protocol/mcp_server.dart';
+import 'package:proxypin/mcp/protocol/mcp_tool.dart';
 import 'package:proxypin/mcp/transport/mcp_http_server.dart';
 import 'package:proxypin/network/http/http.dart';
 import 'package:proxypin/network/util/crypto.dart';
+import 'package:proxypin/ui/configuration.dart';
 
 String hex(List<int> bytes) => bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
 
@@ -606,6 +608,138 @@ void main() {
       expect(limited['truncated'], isTrue);
     } finally {
       await dir.delete(recursive: true);
+    }
+  });
+
+  test('mcp argument aliases normalize flowId and camel/snake names', () {
+    var tool = McpTool(
+      name: 'alias_probe',
+      description: '',
+      inputSchema: {
+        'type': 'object',
+        'properties': {
+          'id': {'type': 'string'},
+          'sample_limit': {'type': 'integer'},
+        },
+      },
+      handler: (_) async => {},
+    );
+
+    var normalized = McpServer.normalizeArgs(tool, {'flowId': 'f1', 'sampleLimit': 7});
+    expect(normalized['id'], 'f1');
+    expect(normalized['sample_limit'], 7);
+    expect(normalized.containsKey('flowId'), isFalse);
+    expect(normalized.containsKey('sampleLimit'), isFalse);
+
+    // 显式传了目标键时不覆盖
+    var explicit = McpServer.normalizeArgs(tool, {'flowId': 'a', 'id': 'b'});
+    expect(explicit['id'], 'b');
+    expect(explicit['flowId'], 'a');
+
+    // schema 中没有的键保持原样
+    var passthrough = McpServer.normalizeArgs(tool, {'unknownKey': 1});
+    expect(passthrough['unknownKey'], 1);
+  });
+
+  test('tools/call resolves flowId alias to the id parameter', () async {
+    var request = HttpRequest(HttpMethod.post, 'https://api.example.com/AliasService/Get');
+    request.headers.set('Content-Type', 'application/grpc');
+    var response = HttpResponse(HttpStatus.ok);
+    response.headers.set('Content-Type', 'application/grpc+proto');
+    response.body = grpcFrame(protoSample());
+    response.request = request;
+    request.response = response;
+
+    var store = FlowStore()..backfill([request]);
+    var server = McpServer(
+      store: store,
+      redactEnabled: () => true,
+      extraTools: McpExtraTools(store: store, redactEnabled: () => true).tools(),
+    );
+
+    var call = await server.handle({
+      'jsonrpc': '2.0',
+      'id': 1,
+      'method': 'tools/call',
+      'params': {
+        'name': 'decode_protobuf',
+        'arguments': {'flowId': request.requestId, 'side': 'response'},
+      },
+    });
+    expect(call!['result']['isError'], isFalse);
+    var payload = jsonDecode(call['result']['content'][0]['text'] as String) as Map;
+    expect(payload['format'], 'grpc');
+  });
+
+  test('analyze_signature scopes analysis to one method+path endpoint', () async {
+    var flows = <HttpRequest>[];
+    for (var i = 0; i < 3; i++) {
+      var request = HttpRequest(HttpMethod.post, 'https://api.example.com/v1/order');
+      request.headers.set('Content-Type', 'application/json');
+      request.body = utf8.encode(jsonEncode({'n': '$i', 'sign': 'a' * 32}));
+      flows.add(request);
+    }
+    var other = HttpRequest(HttpMethod.get, 'https://api.example.com/v1/profile');
+    other.headers.set('Content-Type', 'application/json');
+    other.body = utf8.encode(jsonEncode({'name': 'a'}));
+    flows.add(other);
+
+    var store = FlowStore()..backfill(flows);
+    var tools = McpExtraTools(store: store, redactEnabled: () => true).tools();
+    var tool = tools.firstWhere((item) => item.name == 'analyze_signature');
+
+    var result = await tool.handler({'host': 'api.example.com'}) as Map;
+    var scope = result['scope'] as Map;
+    expect(scope['method'], 'POST');
+    expect(scope['path'], '/v1/order');
+    expect(scope['sampleCount'], 3);
+    expect(scope['endpointCount'], 2);
+    var excluded = scope['excludedEndpoints'] as List;
+    expect((excluded.first as Map)['method'], 'GET');
+    expect(result['path'], '/v1/order');
+
+    // method 过滤后只剩 1 条，返回候选端点而不是混算
+    var tooFew = await tool.handler({'host': 'api.example.com', 'method': 'GET'}) as Map;
+    expect(tooFew['samples'], 1);
+    expect(tooFew['scope'], isNull);
+    expect((tooFew['endpoints'] as List).first['path'], '/v1/profile');
+  });
+
+  test('domain tool governance reports in-memory state and requires a filter', () async {
+    var tools = McpExtraTools(store: FlowStore(), redactEnabled: () => true).tools();
+
+    var list = tools.firstWhere((item) => item.name == 'list_domain_tools');
+    var listed = await list.handler({}) as Map;
+    expect(listed['count'], 0);
+    expect(listed['persisted'], isFalse);
+    expect(listed['note'], isNotNull);
+
+    var remove = tools.firstWhere((item) => item.name == 'remove_domain_tools');
+    await expectLater(remove.handler({}), throwsA(isA<ToolException>()));
+  });
+
+  test('breakpoint timeout config normalizes and clamps values', () {
+    expect(AppConfiguration.normalizeBreakpointTimeout(null), 30);
+    expect(AppConfiguration.normalizeBreakpointTimeout('abc'), 30);
+    expect(AppConfiguration.normalizeBreakpointTimeout(1), 5);
+    expect(AppConfiguration.normalizeBreakpointTimeout(60), 60);
+    expect(AppConfiguration.normalizeBreakpointTimeout(999), 300);
+    expect(AppConfiguration.normalizeBreakpointTimeout(45.9), 45);
+  });
+
+  test('locate_api_in_apk explains missing path and Android-only package', () async {
+    var tools = McpExtraTools(store: FlowStore(), redactEnabled: () => true).tools();
+    var tool = tools.firstWhere((item) => item.name == 'locate_api_in_apk');
+
+    await expectLater(
+      tool.handler({'url': 'https://api.example.com/x'}),
+      throwsA(predicate((error) => error is ToolException && error.message.contains('apk_path'))),
+    );
+    if (!io.Platform.isAndroid) {
+      await expectLater(
+        tool.handler({'url': 'https://api.example.com/x', 'package': 'com.example.app'}),
+        throwsA(predicate((error) => error is ToolException && error.message.contains('Android'))),
+      );
     }
   });
 

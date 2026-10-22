@@ -45,6 +45,19 @@ class InstalledAppsPlugin : AndroidFlutterPlugin() {
                     result.success(getAppInfo(packageName))
                 }
 
+                "getApkPath" -> {
+                    val packageName = call.argument<String>("packageName") ?: ""
+                    Thread {
+                        val path = try {
+                            if (packageName.isEmpty()) null
+                            else activity.packageManager.getApplicationInfo(packageName, 0).sourceDir
+                        } catch (e: Exception) {
+                            null
+                        }
+                        result.success(path)
+                    }.start()
+                }
+
                 else -> result.notImplemented()
             }
         }

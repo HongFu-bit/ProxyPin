@@ -128,7 +128,10 @@ class McpServer {
           'requests time out while ProxyPin is not in the foreground, enable the '
           'floating-window keep-alive in MCP settings. Breakpoint-paused traffic can be '
           'driven from the client with get_pending_intercepts / resolve_intercept; '
-          'unresolved items auto-continue before expiresAtMs.',
+          'unresolved items auto-continue before expiresAtMs. Breakpoints only fire for '
+          'traffic attributed to an app process (VPN mode): shell/adb/root requests have '
+          'no uid and are bypassed by design, so test with a real app instead of curl '
+          'through the proxy port.',
     };
   }
 
@@ -146,7 +149,8 @@ class McpServer {
           id, JsonRpcError(JsonRpcError.invalidParams, 'Unknown tool: $name'));
     }
 
-    var args = (params['arguments'] as Map?)?.cast<String, dynamic>() ?? <String, dynamic>{};
+    var rawArgs = (params['arguments'] as Map?)?.cast<String, dynamic>() ?? <String, dynamic>{};
+    var args = normalizeArgs(tool, rawArgs);
     try {
       var result = await tool.handler(args);
       return JsonRpcResponse.result(id, {
@@ -500,6 +504,59 @@ class McpServer {
   /// 脱敏开启（默认）时，工具参数无法关闭；用户在设置中主动关闭后，未传参数遵循设置，
   /// 显式传 redact:true 仍可脱敏。
   static bool _effectiveRedact(dynamic arg, bool settingEnabled) => settingEnabled || arg == true;
+
+  /// 旧/异构参数名 → 当前 schema 参数名。LLM 常按语义猜 `flowId` / `apkPath`，
+  /// 统一在调用前归一化，不要求客户端记住每个工具的命名风格。
+  static const Map<String, String> _argAliases = {
+    'flowId': 'id',
+    'flow_id': 'id',
+    'urlPattern': 'url',
+  };
+
+  /// 参数名归一化：显式别名 → camelCase/snake_case 互转，仅当目标键存在于该工具 schema
+  /// 且调用方没有显式传目标键时生效。
+  static Map<String, dynamic> normalizeArgs(McpTool tool, Map<String, dynamic> args) {
+    var properties = (tool.inputSchema['properties'] as Map?)?.keys.map((e) => e.toString()).toSet();
+    if (properties == null || properties.isEmpty || args.isEmpty) return args;
+
+    Map<String, dynamic>? normalized;
+    for (var key in args.keys.toList()) {
+      if (properties.contains(key)) continue;
+      var target = _aliasTarget(key, properties);
+      if (target == null || args.containsKey(target)) continue;
+      normalized ??= Map<String, dynamic>.from(args);
+      normalized.remove(key);
+      normalized[target] = args[key];
+    }
+    return normalized ?? args;
+  }
+
+  static String? _aliasTarget(String key, Set<String> properties) {
+    var alias = _argAliases[key];
+    if (alias != null && properties.contains(alias)) return alias;
+
+    var snake = _toSnakeCase(key);
+    if (snake != key && properties.contains(snake)) return snake;
+
+    var camel = _toCamelCase(key);
+    if (camel != key && properties.contains(camel)) return camel;
+    return null;
+  }
+
+  static String _toSnakeCase(String value) =>
+      value.replaceAllMapped(RegExp(r'[A-Z]'), (m) => '_${m.group(0)!.toLowerCase()}');
+
+  static String _toCamelCase(String value) {
+    var parts = value.split('_');
+    if (parts.length < 2) return value;
+    var buffer = StringBuffer(parts.first);
+    for (var part in parts.skip(1)) {
+      if (part.isEmpty) continue;
+      buffer.write(part[0].toUpperCase());
+      buffer.write(part.substring(1));
+    }
+    return buffer.toString();
+  }
 
   static int? _intArg(dynamic value) {
     if (value is int) return value;

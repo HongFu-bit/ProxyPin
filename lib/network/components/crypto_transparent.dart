@@ -551,7 +551,8 @@ class CryptoDetector {
         'mode': null,
         'padding': null,
         'keyCandidates': const [],
-        'note': '没有找到可分析的二进制 body。先触发该接口，或确认加密档的 contentTypes 不是 text/json。',
+        'note': 'No binary body found to analyze. Trigger this endpoint first, or check that the crypto profile '
+            'contentTypes do not treat the body as text/json.',
       };
     }
 

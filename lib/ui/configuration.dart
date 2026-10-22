@@ -134,6 +134,13 @@ class AppConfiguration {
   /// 移动端是否启用悬浮窗前台服务，避免系统冻结 App 导致 MCP 端口不可达
   bool mcpFloatingEnabled = false;
 
+  /// 交互式断点挂起后的自动放行超时（秒），范围 5–300
+  int mcpBreakpointTimeoutSec = 30;
+
+  /// 解析并约束断点超时；非法值回退默认 30 秒。
+  static int normalizeBreakpointTimeout(dynamic value) =>
+      value is num ? value.toInt().clamp(5, 300) : 30;
+
   AppConfiguration._();
 
   /// 单例
@@ -262,6 +269,7 @@ class AppConfiguration {
       mcpAddress = (address == null || address.trim().isEmpty) ? null : address.trim();
       mcpLanEnabled = config['mcpLanEnabled'] ?? false;
       mcpFloatingEnabled = config['mcpFloatingEnabled'] ?? false;
+      mcpBreakpointTimeoutSec = normalizeBreakpointTimeout(config['mcpBreakpointTimeoutSec']);
     } catch (e) {
       logger.e(e);
     }
@@ -316,6 +324,7 @@ class AppConfiguration {
       if (mcpAddress != null) 'mcpAddress': mcpAddress,
       'mcpLanEnabled': mcpLanEnabled,
       'mcpFloatingEnabled': mcpFloatingEnabled,
+      'mcpBreakpointTimeoutSec': mcpBreakpointTimeoutSec,
     };
   }
 }

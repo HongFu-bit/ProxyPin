@@ -154,6 +154,9 @@ class CryptoTools {
             'count': store.profiles.length,
             'profiles': store.profiles.map((e) => e.toPublicJson()).toList(),
             'note': 'Key material is stored locally in crypto_profiles.json and never returned by this tool.',
+            if (store.profiles.isEmpty)
+              'hint': 'No profiles registered yet. Call register_crypto_profile with name, algorithm, key, '
+                  'contentTypes and optional host/path to enable transparent decryption.',
           };
         },
       );

@@ -18,8 +18,8 @@ Prerequisites: desktop ProxyPin is running and the MCP service is enabled. By de
 
 The service always exposes the full tool set (like Proxyman — there is no read-only mode):
 
-- **Read-only tools**: `get_proxy_status`, `list_histories`, `list_flows`, `search_flows`, `get_flow_detail`, `get_flow_body`, `get_flow_messages`, `get_ssl_proxying_list`, `export_flow_curl`, `get_pending_intercepts`, `analyze_signature`, `generate_api_contract`, `trace_field_flow`, `decode_protobuf`, `locate_api_in_apk`, `get_audit_log`, `list_crypto_profiles`, `detect_crypto_profile`, `list_ws_rewrites`.
-- **Write tools**: rule writes (breakpoint / block / map-local / rewrite / script), host filter, replay, system proxy, favorites, clear session, code generation, `resolve_intercept`, `build_offline_mock`, `register_crypto_profile`, `apply_crypto_profile`, `remove_crypto_profile`, `send_ws_message`, `set_ws_rewrite`, `generate_domain_tools`.
+- **Read-only tools**: `get_proxy_status`, `list_histories`, `list_flows`, `search_flows`, `get_flow_detail`, `get_flow_body`, `get_flow_messages`, `get_ssl_proxying_list`, `export_flow_curl`, `get_pending_intercepts`, `analyze_signature`, `generate_api_contract`, `trace_field_flow`, `decode_protobuf`, `locate_api_in_apk`, `get_audit_log`, `list_crypto_profiles`, `detect_crypto_profile`, `list_ws_rewrites`, `list_domain_tools`.
+- **Write tools**: rule writes (breakpoint / block / map-local / rewrite / script), host filter, replay, system proxy, favorites, clear session, code generation, `resolve_intercept`, `build_offline_mock`, `register_crypto_profile`, `apply_crypto_profile`, `remove_crypto_profile`, `send_ws_message`, `set_ws_rewrite`, `generate_domain_tools`, `remove_domain_tools`.
 - **Active testing tools** (send real requests): `race_replay`, `fuzz_flow`, `scan_cross_user` — rate-limited by default; see below.
 
 Confirm reachability with `get_proxy_status` first; then get each rule's stable `id` from `list_rules` (every `remove_*` / `update_*` / detail tool takes `id`; the legacy `index` is still accepted but drifts when the list changes).
@@ -63,14 +63,16 @@ Breakpoint rules pause matching traffic for editing. The MCP client can drive th
 
 1. `get_pending_intercepts(phase?: request|response, limit?)` — list paused items. Each item has `id`, `flowId`, `headers`, `body`, `expiresAtMs`, `remainingMs`.
 2. `resolve_intercept(id, action: continue|drop, headers?, body?, statusCode?)` — `headers` are merged (same-name overwritten), `body` replaces the whole message as UTF-8, `statusCode` applies to response phase only. A dropped request/response is aborted; a dropped response is not sent.
-3. Each item resolves exactly once; a second call returns an error. Unresolved items **auto-continue** at `expiresAtMs` (default 60s) so a disconnected client cannot hang the target app.
+3. Each item resolves exactly once; a second call returns an error. Unresolved items **auto-continue** at `expiresAtMs` (default 30s, configurable via `mcpBreakpointTimeoutSec` in `ui_config.json`, 5–300) so a disconnected client cannot hang the target app.
 
 The ProxyPin UI window and the MCP client race on the same item — whichever acts first wins. Use this when you need to inspect a live request, rewrite a field, and observe the response without asking the user to edit in the UI.
+
+Breakpoints only fire for traffic attributed to an app process through VPN capture. Requests without a uid (shell/adb/root/curl through the proxy port) are bypassed by design, so verify with a real app rather than a local `curl`.
 
 ## Encoding & signature analysis
 
 - **Nothing to set up**: `get_flow_detail` automatically appends `decoded` candidates for JWT, Base64, Hex, URL-encoded and protobuf-Any bodies. Treat them as hints, not proof.
-- **Find the signature field**: `analyze_signature(host:, path?, sample_limit?, secret?, history_id?)` compares 2+ captured requests to the same endpoint and reports `constantFields`, `varyingFields`, `signatureCandidates`, and a `bruteForce` block. It tries common concatenations (sorted `k=v&...`, concatenated, raw body, query, with/without a supplied secret) against MD5 / SHA-1 / SHA-256 / HMAC-SHA256. `matched` is evidence; absence of a match is not proof the field is unrelated.
+- **Find the signature field**: `analyze_signature(host:, path?, method?, sample_limit?, secret?, history_id?)` compares 2+ captured requests to the same method+path endpoint and reports `constantFields`, `varyingFields`, `signatureCandidates`, and a `bruteForce` block. Matches are grouped by method+path; only the endpoint with the most samples is analyzed, and `scope` reports the chosen endpoint, sample counts and up to 10 excluded endpoints. Pass `method` and/or `path` when several endpoints share a host. It tries common concatenations (sorted `k=v&...`, concatenated, raw body, query, with/without a supplied secret) against MD5 / SHA-1 / SHA-256 / HMAC-SHA256. `matched` is evidence; absence of a match is not proof the field is unrelated.
 - A useful chain: decrypt/identify a body with `decoded` → `analyze_signature` to find the `sign` field → create a breakpoint → `resolve_intercept` with edited parameters and recomputed signature.
 - **Protobuf / gRPC**: `decode_protobuf(id:, side?, format?, history_id?)` decodes a captured body without a `.proto`. It parses the wire format (field number/wire type/raw value); length-delimited values are guessed as string → nested message → bytes. gRPC is detected from `Content-Type: application/grpc*` or a valid 5-byte frame sequence, supports multiple frames, and gunzips `flag=1` frames. Output is explicitly `degraded: true` — field names and enums are unknowable without the schema.
 
@@ -108,11 +110,11 @@ The ProxyPin UI window and the MCP client race on the same item — whichever ac
 - with `cryptoProfile`, decrypts the response body when it matches that profile's codec;
 - with `signatureProfile: "auto"`, runs `analyze_signature` on the endpoint samples and recomputes the field only when a digest match is proven (MD5/SHA-1/SHA-256/HMAC-SHA256 over sorted pairs/concatenation/body/query/path). The observed `query` and `raw-body` recipes are best-effort, because the captured signature itself was part of those inputs. When no signature is proven, captured signature values are reused — editing signed fields will usually fail.
 
-Pass an explicit object (`{field, algorithm, input, secret?}`) when you already know the recipe. Regenerating for the same host replaces only the tools generated by the previous run. Generated tools live in memory, appear in `tools/list`, and disappear on restart. They operate under the captured account — do not point them at another user without authorization.
+Pass an explicit object (`{field, algorithm, input, secret?}`) when you already know the recipe. Regenerating for the same host replaces only the tools generated by the previous run. Generated tools live in memory (`persisted: false`), appear in `tools/list`, and disappear on restart; `list_domain_tools(host?, prefix?)` audits them and `remove_domain_tools(host? | prefix? | all:true)` unregisters them early. They operate under the captured account — do not point them at another user without authorization.
 
 ## APK string locator
 
-`locate_api_in_apk(url:, apk_path:, max_hits?)` searches an APK you point it at for the URL and its path segments. It scans `classes*.dex` and `.so` entries for UTF-8 literals and reports the zip entry, byte offset, hex context and (for dex hits) the nearest `L...;` class descriptor. This is **string-level evidence only** — it does not decompile, build an xref, or prove which code calls the endpoint. The APK is read from disk; nothing is uploaded.
+`locate_api_in_apk(url:, apk_path? | package?, max_hits?)` searches an APK you point it at for the URL and its path segments. On Android, pass `package` instead of `apk_path` to resolve an installed app's base APK automatically. It scans `classes*.dex` and `.so` entries for UTF-8 literals and reports the zip entry, byte offset, hex context and (for dex hits) the nearest `L...;` class descriptor. This is **string-level evidence only** — it does not decompile, build an xref, or prove which code calls the endpoint. The APK is read from disk; nothing is uploaded.
 
 ## Offline mock
 
