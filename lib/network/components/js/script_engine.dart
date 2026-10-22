@@ -13,6 +13,7 @@ import '../../util/logger.dart';
 import '../../util/uri.dart';
 import 'file.dart';
 import 'md5.dart';
+import 'context_bridge.dart';
 
 class JavaScriptRuntimePool {
   final int size;
@@ -106,6 +107,7 @@ class JavaScriptEngine {
       channelCallbacks!["ConsoleLog"] = consoleLog;
     }
     Md5Bridge.registerMd5(flutterJs);
+    ContextBridge.register(flutterJs);
     FileBridge.registerFile(flutterJs);
 
     flutterJs.enableFetch2();

@@ -2,6 +2,7 @@ import 'dart:typed_data';
 
 import 'package:proxypin/network/channel/channel.dart';
 import 'package:proxypin/network/channel/host_port.dart';
+import 'package:proxypin/network/components/crypto_transparent.dart';
 import 'package:proxypin/network/http/codec.dart';
 import 'package:proxypin/network/http/h2/frame.dart';
 import 'package:proxypin/network/http/h2/setting.dart';
@@ -143,18 +144,21 @@ class ChannelContext {
   }
 
   Future<void> writeForwardedRequest(Channel remote, HttpRequest request) async {
-    if (request.protocolVersion != 'HTTP/2') {
-      await remote.write(this, request);
-      return;
-    }
-    final streamId = request.streamId!;
-    if (!http2Requests.canForward(streamId)) return;
-    // encode/add 在首次 await 前完成，先写 HEADERS，再写之前缓存的 DATA。
-    final writes = <Future<void>>[remote.write(this, request)];
-    final buffered = _pendingHttp2StreamFrames.remove(streamId);
-    if (buffered != null) writes.add(remote.writeBytes(buffered.takeBytes()));
-    _forwardedHttp2Streams.add(streamId);
-    await Future.wait(writes);
+    // 透明加密档：写线上前临时换回密文，写完恢复明文（MCP/UI 始终看到明文）。
+    await CryptoTransparent.writeRequest(request, () async {
+      if (request.protocolVersion != 'HTTP/2') {
+        await remote.write(this, request);
+        return;
+      }
+      final streamId = request.streamId!;
+      if (!http2Requests.canForward(streamId)) return;
+      // encode/add 在首次 await 前完成，先写 HEADERS，再写之前缓存的 DATA。
+      final writes = <Future<void>>[remote.write(this, request)];
+      final buffered = _pendingHttp2StreamFrames.remove(streamId);
+      if (buffered != null) writes.add(remote.writeBytes(buffered.takeBytes()));
+      _forwardedHttp2Streams.add(streamId);
+      await Future.wait(writes);
+    });
   }
 
   /// 上游尚未打开的流不能收到 RST_STREAM，否则会牵连其它复用请求。

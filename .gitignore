@@ -52,3 +52,7 @@ l10n_errors.txt
 pubspec.lock
 /dist/
 .claude/
+# Android signing (never commit keystores or credentials)
+/android/key.properties
+**/*.jks
+**/*.keystore

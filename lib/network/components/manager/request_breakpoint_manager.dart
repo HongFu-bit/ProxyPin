@@ -4,8 +4,11 @@ import 'dart:io';
 import 'package:proxypin/network/http/http.dart';
 import 'package:proxypin/storage/path.dart';
 import 'package:proxypin/network/util/logger.dart';
+import 'package:proxypin/utils/rule_id.dart';
 
 class RequestBreakpointRule {
+  /// 稳定标识，供 MCP 等外部调用方寻址；旧配置缺省时自动生成并回写。
+  final String id;
   bool enabled;
   String? name;
   String url;
@@ -17,13 +20,14 @@ class RequestBreakpointRule {
   HttpMethod? method;
 
   RequestBreakpointRule({
+    String? id,
     this.enabled = true,
     this.name,
     required this.url,
     this.interceptRequest = true,
     this.interceptResponse = true,
     this.method,
-  });
+  }) : id = id ?? newRuleId();
 
   bool match(String url, {HttpMethod? method}) {
     if (!enabled) return false;
@@ -42,6 +46,7 @@ class RequestBreakpointRule {
     }
 
     return RequestBreakpointRule(
+      id: map['id']?.toString(),
       enabled: map['enabled'] ?? true,
       name: map['name'],
       url: map['url'] ?? '',
@@ -53,6 +58,7 @@ class RequestBreakpointRule {
 
   Map<String, dynamic> toJson() {
     return {
+      'id': id,
       'enabled': enabled,
       'name': name,
       'url': url,
@@ -86,7 +92,12 @@ class RequestBreakpointManager {
       if (await file.exists()) {
         var json = jsonDecode(await file.readAsString());
         enabled = json['enabled'] ?? false;
-        list = (json['list'] as List? ?? []).map((e) => RequestBreakpointRule.fromJson(e)).toList();
+        var rawList = json['list'] as List? ?? [];
+        list = rawList.map((e) => RequestBreakpointRule.fromJson(e)).toList();
+        // 旧配置没有 id：生成后立即回写，保证跨重启稳定
+        if (rawList.any((e) => e is Map && (e['id'] == null || e['id'].toString().isEmpty))) {
+          await save();
+        }
       }
     } catch (e) {
       logger.e('Failed to load request breakpoint config', error: e);

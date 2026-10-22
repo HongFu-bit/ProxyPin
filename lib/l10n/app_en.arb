@@ -415,6 +415,8 @@
   "mcpConfig": "MCP Configuration",
   "mcpRedact": "Redact sensitive data before sending to AI",
   "mcpRedactDescribe": "Automatically redact sensitive information before it is sent to AI tools.",
+  "mcpAudit": "Log MCP tool calls locally",
+  "mcpAuditDescribe": "Write tool name, redacted arguments, client IP and result to mcp_audit.jsonl (256 KB ring). The file stays on this device.",
   "mcpHintRun": "Run this command in Terminal to add ProxyPin MCP to {client}.",
   "@mcpHintRun": {
     "placeholders": {
@@ -433,6 +435,11 @@
   "mcpEndpoint": "MCP Endpoint",
   "mcpAddress": "Address",
   "mcpAddressInvalid": "Enter a valid IP address, or leave blank for auto",
+  "mcpLanAccess": "Allow LAN access",
+  "mcpLanAccessDescribe": "Bind 0.0.0.0 so computers on the same Wi-Fi can connect; requires an access token. Off means only this device can connect.",
+  "mcpFloatingWindow": "Background keep-alive (floating window)",
+  "mcpFloatingWindowDescribe": "Shows a small draggable bubble and runs a foreground service so Android does not freeze the app and break MCP connections.",
+  "mcpOverlayPermissionRequired": "Overlay permission is required. Grant it, then toggle again.",
   "mcpPortInvalid": "Please enter a valid port between 1024 and 65535",
   "mcpAccessToken": "Access Token",
   "mcpLanGuide": "Keep this phone and your computer on the same Wi-Fi, then run one of the commands below in your computer's terminal, or paste the configuration into your AI client's MCP settings.",

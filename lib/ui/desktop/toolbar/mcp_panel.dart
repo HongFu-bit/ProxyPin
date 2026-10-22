@@ -505,6 +505,17 @@ class _McpServiceDialogState extends State<McpServiceDialog> {
                     cfg.flushConfig();
                   },
                 ),
+                const SizedBox(height: 10),
+                _checkRow(
+                  cs,
+                  value: cfg.mcpAuditEnabled,
+                  title: l.mcpAudit,
+                  subtitle: l.mcpAuditDescribe,
+                  onChanged: (v) {
+                    setState(() => cfg.mcpAuditEnabled = v);
+                    cfg.flushConfig();
+                  },
+                ),
                 const SizedBox(height: 16),
                 _divider(cs),
                 const SizedBox(height: 16),

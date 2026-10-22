@@ -48,6 +48,7 @@ dependencies:
   # 必须与 code_forge 的 codegen 版本精确一致（flutter_rust_bridge 要求 codegen==runtime），
   flutter_rust_bridge: 2.12.0
   archive: ^4.2.0
+  flutter_secure_storage: ^11.2.0
 
 dev_dependencies:
   flutter_test:

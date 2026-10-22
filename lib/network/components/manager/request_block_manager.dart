@@ -19,6 +19,7 @@ import 'dart:io';
 
 import 'package:path_provider/path_provider.dart';
 import 'package:proxypin/network/util/url_pattern.dart';
+import 'package:proxypin/utils/rule_id.dart';
 
 /// 请求屏蔽
 /// @author wanghongen
@@ -57,9 +58,14 @@ class RequestBlockManager {
     var config = jsonDecode(json);
     enabled = config['enabled'] == true;
     list.clear();
-    config['list']?.forEach((element) {
+    var rawList = config['list'] as List? ?? [];
+    for (var element in rawList) {
       list.add(RequestBlockItem.fromJson(element));
-    });
+    }
+    // 旧配置没有 id：生成后立即回写，保证跨重启稳定
+    if (rawList.any((e) => e is Map && (e['id'] == null || e['id'].toString().isEmpty))) {
+      await flushConfig();
+    }
   }
 
   addBlockRequest(RequestBlockItem item) {
@@ -107,12 +113,14 @@ enum BlockType {
 }
 
 class RequestBlockItem {
+  /// 稳定标识，供 MCP 等外部调用方寻址；旧配置缺省时自动生成并回写。
+  final String id;
   bool enabled = true;
   String url;
   BlockType type;
   RegExp? urlReg;
 
-  RequestBlockItem(this.enabled, this.url, this.type);
+  RequestBlockItem(this.enabled, this.url, this.type, {String? id}) : id = id ?? newRuleId();
 
   //匹配url
   bool match(String matchUrl, BlockType blockType) {
@@ -121,11 +129,11 @@ class RequestBlockItem {
   }
 
   factory RequestBlockItem.fromJson(Map<String, dynamic> json) {
-    return RequestBlockItem(json['enabled'], json['url'], BlockType.nameOf(json['type']));
+    return RequestBlockItem(json['enabled'], json['url'], BlockType.nameOf(json['type']), id: json['id']?.toString());
   }
 
   Map<String, dynamic> toJson() {
-    return {'enabled': enabled, 'url': url, 'type': type.name};
+    return {'id': id, 'enabled': enabled, 'url': url, 'type': type.name};
   }
 
   @override

@@ -219,7 +219,8 @@ void main() {
     var actionNames = actions.tools().map((t) => t.name).toSet();
     check(actionNames.contains('create_breakpoint'), 'actions include create_breakpoint');
     check(actionNames.contains('clear_session'), 'actions include clear_session');
-    check(actionNames.contains('toggle_recording'), 'actions include toggle_recording');
+    check(actionNames.contains('set_recording'), 'actions include set_recording');
+    check(actionNames.contains('toggle_recording'), 'actions include toggle_recording alias');
     check(actionNames.contains('get_script_detail'), 'actions include get_script_detail');
     for (var type in ['breakpoint', 'block', 'map_local', 'redirect', 'script']) {
       check(actionNames.contains('update_$type'), 'actions include update_$type');
@@ -233,7 +234,8 @@ void main() {
     // 只读流量工具与写工具同时暴露，无门控
     check(names.contains('list_flows'), 'exposes read tool list_flows');
     check(names.contains('create_breakpoint'), 'exposes create_breakpoint');
-    check(names.contains('toggle_recording'), 'exposes toggle_recording');
+    check(names.contains('set_recording') && names.contains('toggle_recording'),
+        'exposes set_recording and its alias');
     check(names.contains('replay_flow') && names.contains('generate_code'), 'exposes replay/generate');
     check(names.length == 9 + actionNames.length, 'exposes builtin + action tools, got ${names.length}');
   });
@@ -420,6 +422,83 @@ void main() {
       // 清理本次创建的规则（逆序删除避免索引偏移）
       for (var i = created.length - 1; i >= 0; i--) {
         await call('remove_rewrite_rule', {'index': created[i]});
+      }
+    }
+  });
+
+  test('mcp write tools: rewrite rules addressable by stable id', () async {
+    var store = FlowStore();
+    var actions = McpActions(store: store);
+    var mcp = McpServer(
+        store: store, redactEnabled: () => true, extraTools: actions.tools());
+
+    Future<Map?> call(String name, Map args) async {
+      var res = await mcp.handle({
+        'jsonrpc': '2.0',
+        'id': 1,
+        'method': 'tools/call',
+        'params': {'name': name, 'arguments': args}
+      });
+      var isError = res!['result']['isError'] == true;
+      var text = res['result']['content'][0]['text'] as String;
+      return {'isError': isError, 'payload': isError ? null : jsonDecode(text) as Map};
+    }
+
+    var createdIds = <String>[];
+    try {
+      var created = await call('create_rewrite', {
+        'url': '*.stable-id.test',
+        'operations': [
+          {'op': 'addHeader', 'key': 'X-Stable', 'value': '1'}
+        ]
+      });
+      check(created!['isError'] == false, 'create ok');
+      var id = (created['payload'] as Map)['id'] as String?;
+      check(id != null && id.isNotEmpty, 'create payload carries id');
+      check(
+          RegExp(r'^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$')
+              .hasMatch(id!),
+          'id is uuid v4');
+      createdIds.add(id);
+
+      // 再插入一条规则，模拟列表顺序变化（index 漂移）
+      var other = await call('create_rewrite', {
+        'url': '*.other-id.test',
+        'operations': [{'op': 'addHeader', 'key': 'X-Other', 'value': '1'}]
+      });
+      var otherId = (other!['payload'] as Map)['id'] as String;
+      createdIds.add(otherId);
+      check(otherId != id, 'ids are unique');
+
+      var byId = await call('get_rewrite_detail', {'id': id});
+      check(byId!['isError'] == false, 'get by id ok');
+      check((byId['payload'] as Map)['url'] == '*.stable-id.test', 'id still resolves to the right rule after insertion');
+      check((byId['payload'] as Map)['id'] == id, 'detail echoes id');
+
+      var updated = await call('update_rewrite', {'id': id, 'enabled': false});
+      check(updated!['isError'] == false, 'update by id ok');
+      check((updated['payload'] as Map)['id'] == id, 'update keeps id');
+      check(((await call('get_rewrite_detail', {'id': id}))!['payload'] as Map)['enabled'] == false,
+          'enabled persisted via id');
+
+      var missing = await call('get_rewrite_detail', {'id': '00000000-0000-4000-8000-000000000000'});
+      check(missing!['isError'] == true, 'unknown id is a tool error');
+
+      var removed = await call('remove_rewrite_rule', {'id': id});
+      check(removed!['isError'] == false, 'remove by id ok');
+      check((removed['payload'] as Map)['id'] == id, 'removed the addressed rule');
+      createdIds.remove(id);
+      check((await call('get_rewrite_detail', {'id': id}))!['isError'] == true, 'removed rule no longer resolvable');
+
+      // 旧 index 寻址仍然可用
+      var byIndex = await call('get_rewrite_detail', {'index': 0});
+      check(byIndex!['isError'] == false, 'legacy index still accepted');
+      var indexRemoved = await call('remove_rewrite_rule', {'index': 0});
+      check(indexRemoved!['isError'] == false, 'legacy index remove still works');
+      createdIds.remove(indexRemoved['payload']['id']);
+    } finally {
+      for (var id in List.of(createdIds)) {
+        await call('remove_rewrite_rule', {'id': id});
       }
     }
   });

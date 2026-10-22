@@ -404,6 +404,8 @@
   "mcpConfig": "MCP 配置",
   "mcpRedact": "在发送给 AI 之前脱敏敏感数据",
   "mcpRedactDescribe": "在发送到 AI 工具前自动脱敏敏感信息。",
+  "mcpAudit": "本地记录 MCP 工具调用审计",
+  "mcpAuditDescribe": "将工具名、脱敏后的参数、客户端 IP 与执行结果写入 mcp_audit.jsonl（256 KB 环形）。文件仅保存在本机。",
   "mcpHintRun": "在终端中运行此命令，将 ProxyPin MCP 添加到 {client}。",
   "@mcpHintRun": {
     "placeholders": {
@@ -422,6 +424,11 @@
   "mcpEndpoint": "MCP 服务地址",
   "mcpAddress": "地址",
   "mcpAddressInvalid": "请输入有效的 IP 地址，留空表示自动",
+  "mcpLanAccess": "允许局域网访问",
+  "mcpLanAccessDescribe": "绑定 0.0.0.0，同一 Wi-Fi 下的电脑可连接；需要访问令牌。关闭时仅本机可访问。",
+  "mcpFloatingWindow": "后台常驻（悬浮窗）",
+  "mcpFloatingWindowDescribe": "显示可拖动的小悬浮窗并以前台服务运行，避免系统冻结 App 导致 MCP 连接超时。",
+  "mcpOverlayPermissionRequired": "需要授予悬浮窗权限，授权后请再次打开。",
   "mcpPortInvalid": "请输入 1024-65535 之间的有效端口",
   "mcpAccessToken": "访问令牌",
   "mcpLanGuide": "保持手机与电脑连接同一 Wi-Fi，在电脑终端运行下面任一命令，或将配置粘贴到 AI 客户端的 MCP 设置中。",

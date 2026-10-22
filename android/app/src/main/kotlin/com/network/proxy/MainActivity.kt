@@ -3,6 +3,7 @@ package com.network.proxy
 import android.content.Intent
 import android.content.res.Configuration
 import com.network.proxy.plugin.AppLifecyclePlugin
+import com.network.proxy.plugin.FloatingWindowPlugin
 import com.network.proxy.plugin.InstalledAppsPlugin
 import com.network.proxy.plugin.PictureInPicturePlugin
 import com.network.proxy.plugin.ProcessInfoPlugin
@@ -41,6 +42,7 @@ class MainActivity : FlutterActivity() {
         flutterEngine.plugins.add(lifecycleChannel)
         flutterEngine.plugins.add(InstalledAppsPlugin())
         flutterEngine.plugins.add(ProcessInfoPlugin())
+        flutterEngine.plugins.add(FloatingWindowPlugin())
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {

@@ -13,6 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
@@ -149,8 +150,8 @@ class _MobileSslState extends State<MobileSslWidget> {
             ListTile(
                 title: Text(localizations.exportPrivateKey),
                 onTap: () async {
-                  final file = await CertificateManager.privateKeyFile();
-                  _exportFile("ProxyPinKey.pem", file: file);
+                  final pem = await CertificateManager.privateKeyPem();
+                  _exportFile("ProxyPinKey.pem", bytes: Uint8List.fromList(utf8.encode(pem)));
                 }),
           ]),
           const SizedBox(height: 12),

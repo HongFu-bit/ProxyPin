@@ -20,8 +20,11 @@ import 'dart:io';
 
 import 'package:proxypin/network/util/logger.dart';
 
+import '../extra/audit_log.dart';
+import '../extra/flow_broadcaster.dart';
 import '../protocol/json_rpc.dart';
 import '../protocol/mcp_server.dart';
+import 'bearer_auth.dart';
 import 'setup_script.dart';
 
 /// MCP Streamable HTTP 传输（无状态，单 JSON 响应）。
@@ -41,9 +44,12 @@ class McpHttpServer {
   /// 非空时 /mcp 请求必须携带 `Authorization: Bearer <token>`
   final String? token;
 
+  /// 可选的工具调用审计（opt-in；未配置或关闭时不产生 IO）
+  final AuditLog? audit;
+
   HttpServer? _server;
 
-  McpHttpServer({required this.mcp, InternetAddress? address, this.token})
+  McpHttpServer({required this.mcp, InternetAddress? address, this.token, this.audit})
       : address = address ?? InternetAddress.loopbackIPv4;
 
   bool get isRunning => _server != null;
@@ -64,7 +70,7 @@ class McpHttpServer {
 
   void _handle(HttpRequest req) async {
     try {
-      if (req.method == 'GET' && req.uri.path == '/' ) {
+      if (req.method == 'GET' && req.uri.path == '/') {
         if (!_authorized(req)) return;
         req.response.headers.contentType = ContentType.json;
         req.response.statusCode = HttpStatus.ok;
@@ -76,6 +82,13 @@ class McpHttpServer {
       // 一键配置脚本下发（仅 LAN token 模式有意义）：/mcp/setup.sh、/mcp/setup.ps1
       if (req.method == 'GET' && (req.uri.path == '$path/setup.sh' || req.uri.path == '$path/setup.ps1')) {
         await _handleSetupScript(req);
+        return;
+      }
+
+      // 实时流量事件流（SSE）：GET /mcp/events?host=&method=&events=flow_started,flow_completed
+      if (req.method == 'GET' && req.uri.path == '$path/events') {
+        if (!_authorized(req)) return;
+        await _streamEvents(req);
         return;
       }
 
@@ -97,12 +110,14 @@ class McpHttpServer {
         }
         message = decoded;
       } catch (e) {
-        await _writeJson(req, JsonRpcResponse.error(null,
-            JsonRpcError(JsonRpcError.parseError, 'Parse error: $e')), HttpStatus.badRequest);
+        await _writeJson(req, JsonRpcResponse.error(null, JsonRpcError(JsonRpcError.parseError, 'Parse error: $e')),
+            HttpStatus.badRequest);
         return;
       }
 
+      var stopwatch = Stopwatch()..start();
       var response = await mcp.handle(message);
+      _auditToolCall(message, response, req, stopwatch.elapsed);
       if (response == null) {
         // 通知：202 无响应体
         req.response.statusCode = HttpStatus.accepted;
@@ -125,11 +140,48 @@ class McpHttpServer {
     }
   }
 
-  /// LAN 模式下校验 Bearer token；不通过时直接写 401 并返回 false。
-  bool _authorized(HttpRequest req) {
-    if (token == null || req.headers.value(HttpHeaders.authorizationHeader) == 'Bearer $token') {
-      return true;
+  /// 只审计 tools/call；参数脱敏与落盘都由 [AuditLog] 负责，这里不阻塞响应。
+  void _auditToolCall(Map<String, dynamic> message, Map<String, dynamic>? response, HttpRequest req, Duration elapsed) {
+    var log = audit;
+    if (log == null || message['method'] != 'tools/call') return;
+    var params = (message['params'] as Map?)?.cast<String, dynamic>() ?? const <String, dynamic>{};
+    var tool = params['name']?.toString() ?? 'unknown';
+    var args = (params['arguments'] as Map?)?.cast<String, dynamic>();
+
+    var ok = true;
+    String? error;
+    var rpcError = response?['error'];
+    if (rpcError is Map) {
+      ok = false;
+      error = rpcError['message']?.toString();
+    } else {
+      var result = response?['result'];
+      if (result is Map && result['isError'] == true) {
+        ok = false;
+        var content = result['content'];
+        if (content is List && content.isNotEmpty && content.first is Map) {
+          error = (content.first as Map)['text']?.toString();
+        }
+      }
     }
+
+    unawaited(log.record(
+      tool: tool,
+      arguments: args,
+      client: req.connectionInfo?.remoteAddress.address ?? '-',
+      userAgent: req.headers.value(HttpHeaders.userAgentHeader),
+      elapsed: elapsed,
+      ok: ok,
+      error: error,
+    ));
+  }
+
+  /// LAN 模式下校验 Bearer token；不通过时直接写 401 并返回 false。
+  /// 使用常量时间比较，避免按字符提前返回造成时序侧信道。
+  bool _authorized(HttpRequest req) {
+    if (token == null) return true;
+    var got = req.headers.value(HttpHeaders.authorizationHeader);
+    if (bearerTokenMatches(got, token!)) return true;
     req.response.statusCode = HttpStatus.unauthorized;
     req.response.headers.set(HttpHeaders.wwwAuthenticateHeader, 'Bearer');
     unawaited(req.response.close());
@@ -167,6 +219,71 @@ class McpHttpServer {
     req.response.headers.set('Cache-Control', 'no-store');
     req.response.add(utf8.encode(script));
     await req.response.close();
+  }
+
+  /// 保持连接不关闭，持续下发抓包事件；15s 心跳防止中间设备断开。
+  Future<void> _streamEvents(HttpRequest req) async {
+    var host = req.uri.queryParameters['host']?.toLowerCase();
+    var method = req.uri.queryParameters['method']?.toUpperCase();
+    var wanted = (req.uri.queryParameters['events'] ?? '')
+        .split(',')
+        .map((value) => value.trim())
+        .where((value) => value.isNotEmpty)
+        .toSet();
+
+    req.response.statusCode = HttpStatus.ok;
+    req.response.headers.contentType = ContentType('text', 'event-stream', charset: 'utf-8');
+    req.response.headers.set('Cache-Control', 'no-cache');
+    req.response.headers.set('Connection', 'keep-alive');
+    req.response.headers.set('X-Accel-Buffering', 'no');
+    req.response.bufferOutput = false;
+    req.response.write(': subscribed\n\n');
+
+    var closed = false;
+    Timer? timer;
+    StreamSubscription<Map<String, dynamic>>? subscription;
+
+    Future<void> cleanup() async {
+      if (closed) return;
+      closed = true;
+      timer?.cancel();
+      await subscription?.cancel();
+      try {
+        await req.response.close();
+      } catch (_) {}
+    }
+
+    bool matches(Map<String, dynamic> event) {
+      if (wanted.isNotEmpty && !wanted.contains(event['event'])) return false;
+      if (host != null && host.isNotEmpty) {
+        var url = (event['url'] as String?)?.toLowerCase() ?? '';
+        if (!url.contains(host)) return false;
+      }
+      if (method != null && method.isNotEmpty) {
+        if ((event['method'] as String?)?.toUpperCase() != method) return false;
+      }
+      return true;
+    }
+
+    subscription = FlowBroadcaster.instance.stream.listen((event) {
+      if (closed || !matches(event)) return;
+      try {
+        req.response.write('event: ${event['event']}\ndata: ${jsonEncode(event)}\n\n');
+      } catch (_) {
+        cleanup();
+      }
+    }, onError: (_) => cleanup());
+
+    timer = Timer.periodic(const Duration(seconds: 15), (_) {
+      if (closed) return;
+      try {
+        req.response.write(': keepalive\n\n');
+      } catch (_) {
+        cleanup();
+      }
+    });
+
+    unawaited(req.response.done.whenComplete(cleanup));
   }
 
   Future<void> _writeJson(HttpRequest req, Map<String, dynamic> payload, int status) async {

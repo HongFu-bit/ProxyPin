@@ -1247,6 +1247,12 @@ class AppLocalizationsZh extends AppLocalizations {
   String get mcpRedactDescribe => '在发送到 AI 工具前自动脱敏敏感信息。';
 
   @override
+  String get mcpAudit => '本地记录 MCP 工具调用审计';
+
+  @override
+  String get mcpAuditDescribe => '将工具名、脱敏后的参数、客户端 IP 与执行结果写入 mcp_audit.jsonl（256 KB 环形）。文件仅保存在本机。';
+
+  @override
   String mcpHintRun(String client) {
     return '在终端中运行此命令，将 ProxyPin MCP 添加到 $client。';
   }
@@ -1275,8 +1281,27 @@ class AppLocalizationsZh extends AppLocalizations {
 
   @override
   String get mcpEndpoint => 'MCP 服务地址';
+
+  @override
   String get mcpAddress => '地址';
+
+  @override
   String get mcpAddressInvalid => '请输入有效的 IP 地址，留空表示自动';
+
+  @override
+  String get mcpLanAccess => '允许局域网访问';
+
+  @override
+  String get mcpLanAccessDescribe => '绑定 0.0.0.0，同一 Wi-Fi 下的电脑可连接；需要访问令牌。关闭时仅本机可访问。';
+
+  @override
+  String get mcpFloatingWindow => '后台常驻（悬浮窗）';
+
+  @override
+  String get mcpFloatingWindowDescribe => '显示可拖动的小悬浮窗并以前台服务运行，避免系统冻结 App 导致 MCP 连接超时。';
+
+  @override
+  String get mcpOverlayPermissionRequired => '需要授予悬浮窗权限，授权后请再次打开。';
 
   @override
   String get mcpPortInvalid => '请输入 1024-65535 之间的有效端口';

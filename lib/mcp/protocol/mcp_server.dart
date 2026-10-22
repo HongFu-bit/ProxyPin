@@ -20,6 +20,7 @@ import 'package:proxypin/mcp/capture/curl_builder.dart';
 import 'package:proxypin/mcp/capture/flow_store.dart';
 import 'package:proxypin/mcp/capture/flow_view.dart';
 import 'package:proxypin/mcp/capture/history_provider.dart';
+import 'package:proxypin/mcp/extra/intercept_queue.dart';
 import 'package:proxypin/network/bin/server.dart';
 import 'package:proxypin/network/components/host_filter.dart';
 import 'package:proxypin/network/http/http.dart';
@@ -35,7 +36,7 @@ import 'mcp_tool.dart';
 class McpServer {
   static const String protocolVersion = '2024-11-05';
   static const String serverName = 'proxypin';
-  static const String serverVersion = '1.0.0';
+  static const String serverVersion = '1.1.0';
 
   final FlowStore store;
 
@@ -48,6 +49,39 @@ class McpServer {
   McpServer({required this.store, required this.redactEnabled, this.extraTools = const []});
 
   late final List<McpTool> _tools = [...builtinTools(store, redactEnabled: redactEnabled), ...extraTools];
+
+  /// 运行时注册工具的名单，用于区分内置工具，避免动态工具覆盖内置实现。
+  final Set<String> _dynamicToolNames = {};
+
+  /// 注册动态工具（如 `generate_domain_tools` 生成的按域语义工具）。
+  /// 同名动态工具会被替换；与内置/静态工具重名时抛 [ArgumentError]。
+  int registerTools(Iterable<McpTool> tools) {
+    var count = 0;
+    for (var tool in tools) {
+      var index = _tools.indexWhere((t) => t.name == tool.name);
+      if (index >= 0 && !_dynamicToolNames.contains(tool.name)) {
+        throw ArgumentError('tool name already in use: ${tool.name}');
+      }
+      if (index >= 0) {
+        _tools[index] = tool;
+      } else {
+        _tools.add(tool);
+      }
+      _dynamicToolNames.add(tool.name);
+      count++;
+    }
+    return count;
+  }
+
+  /// 移除匹配的动态工具；静态工具不受影响。
+  int removeDynamicTools(bool Function(McpTool tool) test) {
+    var before = _tools.length;
+    _tools.removeWhere((tool) => _dynamicToolNames.contains(tool.name) && test(tool));
+    var removed = before - _tools.length;
+    _dynamicToolNames.removeAll(
+        _dynamicToolNames.where((name) => !_tools.any((tool) => tool.name == name)).toList());
+    return removed;
+  }
 
   /// 内置只读工具集（不依赖具体 [McpServer] 实例），供设置页展示工具目录。
   /// 返回的 handler 依赖真实抓包存储，仅用于元数据展示时不会被调用。
@@ -88,6 +122,13 @@ class McpServer {
         'tools': {'listChanged': false},
       },
       'serverInfo': {'name': serverName, 'version': serverVersion},
+      'instructions': 'ProxyPin MCP runs inside the app process. On mobile it listens on '
+          '127.0.0.1 by default (no token); enable LAN access in MCP settings to bind '
+          '0.0.0.0 and require a Bearer token. Android may freeze background apps — if '
+          'requests time out while ProxyPin is not in the foreground, enable the '
+          'floating-window keep-alive in MCP settings. Breakpoint-paused traffic can be '
+          'driven from the client with get_pending_intercepts / resolve_intercept; '
+          'unresolved items auto-continue before expiresAtMs.',
     };
   }
 
@@ -148,6 +189,7 @@ class McpServer {
               'mcpVersion': serverVersion,
               'protocolVersion': protocolVersion,
               'bufferedFlows': store.count,
+              'pendingIntercepts': InterceptQueue.instance.count,
             };
           },
         ),
@@ -299,7 +341,8 @@ class McpServer {
         McpTool(
           name: 'get_flow_body',
           description:
-              'Page a flow request/response body as UTF-8 text. Bodies are capped per call; binary bodies return only mimeType/size/sha256.',
+              'Page a flow request/response body as UTF-8 text, or as Base64 raw bytes with encoding=base64. '
+              'Bodies are capped per call; binary bodies return only mimeType/size/sha256 unless encoding=base64.',
           inputSchema: {
             'type': 'object',
             'properties': {
@@ -309,6 +352,11 @@ class McpServer {
                 'description': 'Saved history session id from list_histories; omit for live capture'
               },
               'side': {'type': 'string', 'enum': ['request', 'response'], 'description': 'default response'},
+              'encoding': {
+                'type': 'string',
+                'enum': ['utf-8', 'base64'],
+                'description': 'Output encoding, default utf-8; base64 returns raw bytes for binary bodies'
+              },
               'offset': {'type': 'integer', 'description': 'Byte offset, default 0'},
               'limit': {'type': 'integer', 'description': 'Max bytes, default 8192, hard cap 65536'},
             },
@@ -321,10 +369,12 @@ class McpServer {
             if (side == 'response' && request.response == null) {
               return {'available': false, 'reason': 'response not received yet'};
             }
+            var encoding = args['encoding']?.toString() == 'base64' ? 'base64' : 'utf-8';
             return await FlowView.bodySlice(
               message,
               offset: _intArgOr(args['offset'], 0),
               limit: _intArgOr(args['limit'], FlowView.defaultPreviewBytes),
+              encoding: encoding,
             );
           },
         ),

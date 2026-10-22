@@ -17,6 +17,7 @@
 import 'package:proxypin/network/http/http.dart';
 import 'package:proxypin/network/util/url_pattern.dart';
 import 'package:proxypin/utils/lang.dart';
+import 'package:proxypin/utils/rule_id.dart';
 
 ///重写规则
 ///@author: wanghongen
@@ -40,6 +41,8 @@ enum RuleType {
 }
 
 class RequestRewriteRule {
+  /// 稳定标识，供 MCP 等外部调用方寻址；旧配置缺省时自动生成并回写。
+  final String id;
   bool enabled;
   RuleType type;
 
@@ -51,8 +54,16 @@ class RequestRewriteRule {
   // 可选的 HTTP 方法匹配；null 表示匹配任意方法
   HttpMethod? method;
 
-  RequestRewriteRule({this.enabled = true, this.name, required this.url, required this.type, this.rewritePath, this.method})
-      : _urlReg = UrlPattern.toRegExp(url);
+  RequestRewriteRule(
+      {String? id,
+      this.enabled = true,
+      this.name,
+      required this.url,
+      required this.type,
+      this.rewritePath,
+      this.method})
+      : id = id ?? newRuleId(),
+        _urlReg = UrlPattern.toRegExp(url);
 
   bool match(String url, {RuleType? type, HttpMethod? method}) {
     if (!enabled) return false;
@@ -80,6 +91,7 @@ class RequestRewriteRule {
     }
 
     return RequestRewriteRule(
+        id: map['id']?.toString(),
         enabled: map['enabled'] == true,
         name: map['name'],
         url: map['url'] ?? map['domain'] + map['path'],
@@ -94,6 +106,7 @@ class RequestRewriteRule {
 
   Map<String, dynamic> toJson() {
     var json = {
+      'id': id,
       'name': name,
       'enabled': enabled,
       'url': url,

@@ -26,6 +26,7 @@ import 'package:proxypin/network/util/url_pattern.dart';
 import 'package:proxypin/network/util/random.dart';
 import 'package:proxypin/storage/path.dart';
 import 'package:proxypin/ui/component/device.dart';
+import 'package:proxypin/utils/rule_id.dart';
 import 'package:http/http.dart' as http;
 
 import '../js/script_engine.dart';
@@ -40,7 +41,15 @@ async function onRequest(context, request) {
   console.log(request.url);
   //Update or add Header
   //request.headers["X-New-Headers"] = "My-Value";
-  
+
+  // 跨请求状态：context.store.set/get（持久化在脚本 session 里）
+  // context.store.set('token', 'abc'); var token = context.store.get('token');
+
+  // 加解密：context.crypto.hash/hmac/aesEncrypt/aesDecrypt/base64Encode/base64Decode/rsaSign
+  // var sign = context.crypto.hash('SHA-256', request.body);
+
+  // 调用 ProxyPin MCP 工具（异步）：var flows = await context.mcp.call('list_flows', {limit: 5});
+
   // Update Body use fetch API request，具体文档可网上搜索fetch API
   //request.body = await fetch('https://www.baidu.com/').then(response => response.text());
   return request;
@@ -135,9 +144,17 @@ async function onResponse(context, request, response) {
       }
       var config = jsonDecode(content);
       enabled = config['enabled'] == true;
-      for (var entry in config['list']) {
+      var rawList = config['list'] as List? ?? [];
+      for (var entry in rawList) {
         scripts.add(ScriptItem.fromJson(entry));
       }
+      list = scripts;
+      _scriptMap.clear();
+      // 旧配置没有 id：生成后立即回写，保证跨重启稳定
+      if (rawList.any((e) => e is Map && (e['id'] == null || e['id'].toString().isEmpty))) {
+        await flushConfig();
+      }
+      return;
     }
     list = scripts;
     _scriptMap.clear();
@@ -306,8 +323,9 @@ async function onResponse(context, request, response) {
         }
 
         var result = await flutterJsPool.run((flutterJs) async {
-          var jsResult = await flutterJs.evaluateAsync(
-              """var request = $jsRequest, context = $context;  request['scriptContext'] = context; $script\n  onRequest(context, request)""");
+          var jsResult = await flutterJs
+              .evaluateAsync("""var request = $jsRequest, context = $context;  request['scriptContext'] = context;
+            __proxypinInitContext(context); $script\n  onRequest(context, request)""");
           return await JavaScriptEngine.jsResultResolve(flutterJs, jsResult);
         });
         if (result == null) {
@@ -337,8 +355,7 @@ async function onResponse(context, request, response) {
       if (item.enabled && item.match(url)) {
         // 响应阶段:优先复用请求阶段设置好的 scriptContext(含中途修改过的 env),
         // 否则新构建一个。用于 diff 的 envBefore 从最终传给 JS 的 context 中取。
-        final ctxMap =
-            (request.attributes['scriptContext'] as Map?)?.cast<String, dynamic>() ?? scriptContext(item);
+        final ctxMap = (request.attributes['scriptContext'] as Map?)?.cast<String, dynamic>() ?? scriptContext(item);
         final envBefore = Map<String, String>.from(((ctxMap['env'] as Map?) ?? const {}).map(
           (k, v) => MapEntry(k.toString(), v?.toString() ?? ''),
         ));
@@ -351,8 +368,9 @@ async function onResponse(context, request, response) {
         }
 
         var result = await flutterJsPool.run((flutterJs) async {
-          var jsResult = await flutterJs.evaluateAsync(
-              """var response = $jsResponse, context = $context;  response['scriptContext'] = context; $script
+          var jsResult = await flutterJs
+              .evaluateAsync("""var response = $jsResponse, context = $context;  response['scriptContext'] = context;
+            __proxypinInitContext(context); $script
             \n  onResponse(context, $jsRequest, response);""");
           return await JavaScriptEngine.jsResultResolve(flutterJs, jsResult);
         });
@@ -397,6 +415,8 @@ class LogInfo {
 }
 
 class ScriptItem {
+  /// 稳定标识，供 MCP 等外部调用方寻址；旧配置缺省时自动生成并回写。
+  final String id;
   bool enabled = true;
   String? name;
   List<String> urls;
@@ -405,8 +425,9 @@ class ScriptItem {
 
   String? remoteUrl;
 
-  ScriptItem(this.enabled, this.name, dynamic urls, {this.scriptPath, this.remoteUrl})
-      : urls = urls is String
+  ScriptItem(this.enabled, this.name, dynamic urls, {String? id, this.scriptPath, this.remoteUrl})
+      : id = id ?? newRuleId(),
+        urls = urls is String
             ? (urls.contains(',') ? urls.split(',').map((e) => e.trim()).toList() : [urls])
             : (urls is List<String> ? urls : <String>[]);
 
@@ -434,6 +455,7 @@ class ScriptItem {
       json['enabled'],
       json['name'],
       urls,
+      id: json['id']?.toString(),
       scriptPath: json['scriptPath'],
       remoteUrl: json['remoteUrl'],
     );
@@ -441,6 +463,7 @@ class ScriptItem {
 
   Map<String, dynamic> toJson() {
     return {
+      'id': id,
       'enabled': enabled,
       'name': name,
       'url': urls.length == 1 ? urls[0] : urls,

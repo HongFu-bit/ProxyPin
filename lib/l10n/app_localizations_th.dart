@@ -1255,6 +1255,13 @@ class AppLocalizationsTh extends AppLocalizations {
   String get mcpRedactDescribe => 'Automatically redact sensitive information before it is sent to AI tools.';
 
   @override
+  String get mcpAudit => 'Log MCP tool calls locally';
+
+  @override
+  String get mcpAuditDescribe =>
+      'Write tool name, redacted arguments, client IP and result to mcp_audit.jsonl (256 KB ring). The file stays on this device.';
+
+  @override
   String mcpHintRun(String client) {
     return 'Run this command in Terminal to add ProxyPin MCP to $client.';
   }
@@ -1283,8 +1290,29 @@ class AppLocalizationsTh extends AppLocalizations {
 
   @override
   String get mcpEndpoint => 'MCP Endpoint';
+
+  @override
   String get mcpAddress => 'Address';
+
+  @override
   String get mcpAddressInvalid => 'Enter a valid IP address, or leave blank for auto';
+
+  @override
+  String get mcpLanAccess => 'Allow LAN access';
+
+  @override
+  String get mcpLanAccessDescribe =>
+      'Bind 0.0.0.0 so computers on the same Wi-Fi can connect; requires an access token. Off means only this device can connect.';
+
+  @override
+  String get mcpFloatingWindow => 'Background keep-alive (floating window)';
+
+  @override
+  String get mcpFloatingWindowDescribe =>
+      'Shows a small draggable bubble and runs a foreground service so Android does not freeze the app and break MCP connections.';
+
+  @override
+  String get mcpOverlayPermissionRequired => 'Overlay permission is required. Grant it, then toggle again.';
 
   @override
   String get mcpPortInvalid => 'Please enter a valid port between 1024 and 65535';

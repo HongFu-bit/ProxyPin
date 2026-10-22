@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:proxypin/network/bin/listener.dart';
 import 'package:proxypin/network/channel/channel.dart';
 import 'package:proxypin/network/channel/channel_context.dart';
+import 'package:proxypin/network/components/crypto_transparent.dart';
 import 'package:proxypin/network/components/host_filter.dart';
 import 'package:proxypin/network/components/interceptor.dart';
 import 'package:proxypin/network/components/manager/request_rewrite_manager.dart';
@@ -321,8 +322,10 @@ class HttpResponseProxyHandler extends ChannelHandler<HttpResponse> {
     // Ensure request is linked if not present
     response?.request ??= request;
     listener?.onResponse(channelContext, response!);
-    //发送给客户端
-    await clientChannel.write(channelContext, response!);
+    //发送给客户端；透明加密档在此换回密文，写完恢复明文
+    var finalResponse = response!;
+    await CryptoTransparent.writeResponse(
+        finalResponse, () => clientChannel.write(channelContext, finalResponse));
   }
 
   @override

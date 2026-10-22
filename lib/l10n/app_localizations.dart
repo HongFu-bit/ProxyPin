@@ -2542,6 +2542,18 @@ abstract class AppLocalizations {
   /// **'Automatically redact sensitive information before it is sent to AI tools.'**
   String get mcpRedactDescribe;
 
+  /// No description provided for @mcpAudit.
+  ///
+  /// In en, this message translates to:
+  /// **'Log MCP tool calls locally'**
+  String get mcpAudit;
+
+  /// No description provided for @mcpAuditDescribe.
+  ///
+  /// In en, this message translates to:
+  /// **'Write tool name, redacted arguments, client IP and result to mcp_audit.jsonl (256 KB ring). The file stays on this device.'**
+  String get mcpAuditDescribe;
+
   /// No description provided for @mcpHintRun.
   ///
   /// In en, this message translates to:
@@ -2607,6 +2619,36 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Enter a valid IP address, or leave blank for auto'**
   String get mcpAddressInvalid;
+
+  /// No description provided for @mcpLanAccess.
+  ///
+  /// In en, this message translates to:
+  /// **'Allow LAN access'**
+  String get mcpLanAccess;
+
+  /// No description provided for @mcpLanAccessDescribe.
+  ///
+  /// In en, this message translates to:
+  /// **'Bind 0.0.0.0 so computers on the same Wi-Fi can connect; requires an access token. Off means only this device can connect.'**
+  String get mcpLanAccessDescribe;
+
+  /// No description provided for @mcpFloatingWindow.
+  ///
+  /// In en, this message translates to:
+  /// **'Background keep-alive (floating window)'**
+  String get mcpFloatingWindow;
+
+  /// No description provided for @mcpFloatingWindowDescribe.
+  ///
+  /// In en, this message translates to:
+  /// **'Shows a small draggable bubble and runs a foreground service so Android does not freeze the app and break MCP connections.'**
+  String get mcpFloatingWindowDescribe;
+
+  /// No description provided for @mcpOverlayPermissionRequired.
+  ///
+  /// In en, this message translates to:
+  /// **'Overlay permission is required. Grant it, then toggle again.'**
+  String get mcpOverlayPermissionRequired;
 
   /// No description provided for @mcpPortInvalid.
   ///

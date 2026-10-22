@@ -18,6 +18,7 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:proxypin/mcp/capture/sensitive_data.dart';
+import 'package:proxypin/mcp/extra/codec_detector.dart';
 import 'package:proxypin/network/http/http.dart';
 import 'package:proxypin/network/http/websocket.dart';
 import 'package:proxypin/network/util/crypto.dart';
@@ -103,8 +104,11 @@ class FlowView {
   }
 
   /// body 分页切片。二进制只返回描述信息。
+  ///
+  /// [encoding] 为 `base64` 时直接返回原始字节的 Base64 切片（二进制报文也能完整导出），
+  /// 默认 `utf-8` 只返回文本。
   static Future<Map<String, dynamic>> bodySlice(HttpMessage? message,
-      {int offset = 0, int limit = defaultPreviewBytes}) async {
+      {int offset = 0, int limit = defaultPreviewBytes, String encoding = 'utf-8'}) async {
     if (message == null) {
       return {'available': false, 'reason': 'message not available'};
     }
@@ -112,6 +116,24 @@ class FlowView {
     limit = limit.clamp(1, maxBodySliceBytes);
 
     var mime = _mime(message);
+    if (encoding == 'base64') {
+      var raw = message.body ?? const <int>[];
+      var total = raw.length;
+      if (offset > total) offset = total;
+      var end = (offset + limit).clamp(0, total);
+      return {
+        'available': true,
+        'binary': isBinary(message),
+        'mimeType': mime,
+        'encoding': 'base64',
+        'offset': offset,
+        'returned': end - offset,
+        'total': total,
+        'truncated': end < total,
+        if (end < total) 'truncatedAt': end,
+        'text': base64Encode(raw.sublist(offset, end)),
+      };
+    }
     if (isBinary(message)) {
       return {
         'available': true,
@@ -139,6 +161,7 @@ class FlowView {
       'returned': end - offset,
       'total': total,
       'truncated': end < total,
+      if (end < total) 'truncatedAt': end,
       'text': slice,
     };
   }
@@ -179,6 +202,12 @@ class FlowView {
 
   static Future<Map<String, dynamic>> _bodyPreview(HttpMessage message, int previewBytes) async {
     var slice = await bodySlice(message, offset: 0, limit: previewBytes);
+    var text = slice['text'];
+    if (text is String && text.isNotEmpty) {
+      // 自动识别 JWT/Base64/Hex 等编码层，作为候选附在预览旁，原始 body 不变
+      var decoded = CodecDetector.detect(text);
+      if (decoded.isNotEmpty) slice['decoded'] = decoded;
+    }
     return slice;
   }
 

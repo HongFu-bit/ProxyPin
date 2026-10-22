@@ -38,6 +38,7 @@ import 'package:proxypin/utils/lang.dart';
 
 import 'mcp_server.dart';
 import 'mcp_tool.dart';
+import 'rule_ref.dart';
 
 /// 写工具面：规则读写、SSL/系统代理、重放/构造、收藏、清理、代码生成。
 ///
@@ -64,7 +65,16 @@ class McpActions {
 
   List<McpTool> tools() => [
         _listRules(),
-        _toggleRecording(),
+        _setRecording(
+            'set_recording',
+            'Start (enabled=true) or stop (enabled=false) traffic '
+                'recording by starting/stopping the local proxy server. This is a set operation, '
+                'not a toggle: `enabled` is required.'),
+        // 旧名保留为别名，避免已配置的客户端失效；语义与 set_recording 相同
+        _setRecording(
+            'toggle_recording',
+            'Alias of set_recording (kept for backward '
+                'compatibility). Requires `enabled`; it sets rather than toggles.'),
         _createBreakpoint(),
         _updateBreakpoint(),
         _removeBreakpoint(),
@@ -124,7 +134,7 @@ class McpActions {
   McpTool _listRules() => McpTool(
         name: 'list_rules',
         description:
-            'List all debugging rules with their indices: breakpoints, blocks, map-local, rewrites/redirects, scripts. Use the returned index with the remove_* tools.',
+            'List all debugging rules with stable ids and legacy indices: breakpoints, blocks, map-local, rewrites/redirects, scripts. Use the returned id with update_*/remove_*/detail tools; index remains supported for compatibility.',
         inputSchema: {'type': 'object', 'properties': {}},
         handler: (_) async {
           var bp = await RequestBreakpointManager.instance;
@@ -139,6 +149,7 @@ class McpActions {
               'rules': [
                 for (var i = 0; i < bp.list.length; i++)
                   {
+                    'id': bp.list[i].id,
                     'index': i,
                     'name': bp.list[i].name,
                     'url': bp.list[i].url,
@@ -153,14 +164,26 @@ class McpActions {
               'enabled': block.enabled,
               'rules': [
                 for (var i = 0; i < block.list.length; i++)
-                  {'index': i, 'url': block.list[i].url, 'enabled': block.list[i].enabled, 'type': block.list[i].type.name}
+                  {
+                    'id': block.list[i].id,
+                    'index': i,
+                    'url': block.list[i].url,
+                    'enabled': block.list[i].enabled,
+                    'type': block.list[i].type.name,
+                  }
               ],
             },
             'mapLocal': {
               'enabled': map.enabled,
               'rules': [
                 for (var i = 0; i < map.rules.length; i++)
-                  {'index': i, 'name': map.rules[i].name, 'url': map.rules[i].url, 'enabled': map.rules[i].enabled}
+                  {
+                    'id': map.rules[i].id,
+                    'index': i,
+                    'name': map.rules[i].name,
+                    'url': map.rules[i].url,
+                    'enabled': map.rules[i].enabled,
+                  }
               ],
             },
             'rewrites': {
@@ -168,6 +191,7 @@ class McpActions {
               'rules': [
                 for (var i = 0; i < rewrite.rules.length; i++)
                   {
+                    'id': rewrite.rules[i].id,
                     'index': i,
                     'name': rewrite.rules[i].name,
                     'url': rewrite.rules[i].url,
@@ -182,6 +206,7 @@ class McpActions {
               'rules': [
                 for (var i = 0; i < script.list.length; i++)
                   {
+                    'id': script.list[i].id,
                     'index': i,
                     'name': script.list[i].name,
                     'urls': script.list[i].urls,
@@ -221,16 +246,21 @@ class McpActions {
           );
           var mgr = await RequestBreakpointManager.instance;
           mgr.add(rule);
-          return {'created': true, 'index': mgr.list.length - 1, 'url': url};
+          return {'created': true, 'id': rule.id, 'index': mgr.list.length - 1, 'url': url};
         },
       );
 
   McpTool _removeBreakpoint() => McpTool(
         name: 'remove_breakpoint',
-        description: 'Remove a breakpoint by index (see list_rules), or disable the breakpoint feature globally.',
+        description:
+            'Remove a breakpoint by id (see list_rules) or legacy index, or disable the breakpoint feature globally.',
         inputSchema: {
           'type': 'object',
-          'properties': {'index': {'type': 'integer'}, 'enabled': {'type': 'boolean'}},
+          'properties': {
+            'id': ruleIdSchema,
+            'index': ruleIndexSchema,
+            'enabled': {'type': 'boolean'}
+          },
         },
         handler: (a) async {
           var mgr = await RequestBreakpointManager.instance;
@@ -239,22 +269,22 @@ class McpActions {
             await mgr.save();
             return {'enabled': mgr.enabled};
           }
-          var index = _int(a['index']);
-          if (index == null || index < 0 || index >= mgr.list.length) throw ToolException('invalid index');
+          var index = resolveRuleIndex(mgr.list, a, (e) => e.id, 'breakpoint rule');
           var removed = mgr.list.removeAt(index);
           await mgr.save();
-          return {'removed': removed.url};
+          return {'removed': removed.url, 'id': removed.id, 'index': index};
         },
       );
 
   McpTool _updateBreakpoint() => McpTool(
         name: 'update_breakpoint',
         description:
-            'Update an existing breakpoint rule by index (see list_rules). Only the fields you pass change; omit the rest to keep them.',
+            'Update an existing breakpoint rule by id (see list_rules) or legacy index. Only the fields you pass change; omit the rest to keep them.',
         inputSchema: {
           'type': 'object',
           'properties': {
-            'index': {'type': 'integer'},
+            'id': ruleIdSchema,
+            'index': ruleIndexSchema,
             'url': {'type': 'string', 'description': 'Regex matched against full URL'},
             'name': {'type': 'string'},
             'method': {'type': 'string', 'description': 'Optional HTTP method filter'},
@@ -262,12 +292,10 @@ class McpActions {
             'intercept_response': {'type': 'boolean'},
             'enabled': {'type': 'boolean'},
           },
-          'required': ['index'],
         },
         handler: (a) async {
           var mgr = await RequestBreakpointManager.instance;
-          var index = _int(a['index']);
-          if (index == null || index < 0 || index >= mgr.list.length) throw ToolException('invalid index');
+          var index = resolveRuleIndex(mgr.list, a, (e) => e.id, 'breakpoint rule');
           var rule = mgr.list[index];
           if (a['url'] != null) rule.url = a['url'].toString();
           if (a['name'] != null) rule.name = a['name'].toString();
@@ -276,18 +304,22 @@ class McpActions {
           if (a['intercept_response'] is bool) rule.interceptResponse = a['intercept_response'] as bool;
           if (a['enabled'] is bool) rule.enabled = a['enabled'] as bool;
           await mgr.save();
-          return {'updated': true, 'index': index, 'url': rule.url};
+          return {'updated': true, 'id': rule.id, 'index': index, 'url': rule.url};
         },
       );
 
   McpTool _createBlock() => McpTool(
         name: 'create_block',
-        description: 'Block matching requests or responses (blacklist). `url` is a wildcard pattern (e.g. *.example.com/*).',
+        description:
+            'Block matching requests or responses (blacklist). `url` is a wildcard pattern (e.g. *.example.com/*).',
         inputSchema: {
           'type': 'object',
           'properties': {
             'url': {'type': 'string'},
-            'type': {'type': 'string', 'enum': ['blockRequest', 'blockResponse']},
+            'type': {
+              'type': 'string',
+              'enum': ['blockRequest', 'blockResponse']
+            },
           },
           'required': ['url'],
         },
@@ -296,17 +328,22 @@ class McpActions {
           if (url == null || url.isEmpty) throw ToolException('url is required');
           var type = a['type']?.toString() == 'blockResponse' ? BlockType.blockResponse : BlockType.blockRequest;
           var mgr = await RequestBlockManager.instance;
-          mgr.addBlockRequest(RequestBlockItem(true, url, type));
-          return {'created': true, 'index': mgr.list.length - 1, 'url': url, 'type': type.name};
+          var item = RequestBlockItem(true, url, type);
+          mgr.addBlockRequest(item);
+          return {'created': true, 'id': item.id, 'index': mgr.list.length - 1, 'url': url, 'type': type.name};
         },
       );
 
   McpTool _removeBlock() => McpTool(
         name: 'remove_block',
-        description: 'Remove a block rule by index, or enable/disable blocking globally.',
+        description: 'Remove a block rule by id (see list_rules) or legacy index, or enable/disable blocking globally.',
         inputSchema: {
           'type': 'object',
-          'properties': {'index': {'type': 'integer'}, 'enabled': {'type': 'boolean'}},
+          'properties': {
+            'id': ruleIdSchema,
+            'index': ruleIndexSchema,
+            'enabled': {'type': 'boolean'}
+          },
         },
         handler: (a) async {
           var mgr = await RequestBlockManager.instance;
@@ -315,31 +352,33 @@ class McpActions {
             await mgr.flushConfig();
             return {'enabled': mgr.enabled};
           }
-          var index = _int(a['index']);
-          if (index == null || index < 0 || index >= mgr.list.length) throw ToolException('invalid index');
+          var index = resolveRuleIndex(mgr.list, a, (e) => e.id, 'block rule');
+          var removed = mgr.list[index];
           mgr.removeBlockRequest(index);
-          return {'removed': true, 'index': index};
+          return {'removed': true, 'id': removed.id, 'index': index};
         },
       );
 
   McpTool _updateBlock() => McpTool(
         name: 'update_block',
         description:
-            'Update an existing block rule by index. `url` is a wildcard pattern (e.g. *.example.com/*). Only the fields you pass change.',
+            'Update an existing block rule by id (see list_rules) or legacy index. `url` is a wildcard pattern (e.g. *.example.com/*). Only the fields you pass change.',
         inputSchema: {
           'type': 'object',
           'properties': {
-            'index': {'type': 'integer'},
+            'id': ruleIdSchema,
+            'index': ruleIndexSchema,
             'url': {'type': 'string'},
-            'type': {'type': 'string', 'enum': ['blockRequest', 'blockResponse']},
+            'type': {
+              'type': 'string',
+              'enum': ['blockRequest', 'blockResponse']
+            },
             'enabled': {'type': 'boolean'},
           },
-          'required': ['index'],
         },
         handler: (a) async {
           var mgr = await RequestBlockManager.instance;
-          var index = _int(a['index']);
-          if (index == null || index < 0 || index >= mgr.list.length) throw ToolException('invalid index');
+          var index = resolveRuleIndex(mgr.list, a, (e) => e.id, 'block rule');
           var item = mgr.list[index];
           if (a['url'] != null) {
             item.url = a['url'].toString();
@@ -350,7 +389,7 @@ class McpActions {
           }
           if (a['enabled'] is bool) item.enabled = a['enabled'] as bool;
           await mgr.flushConfig();
-          return {'updated': true, 'index': index, 'url': item.url, 'type': item.type.name};
+          return {'updated': true, 'id': item.id, 'index': index, 'url': item.url, 'type': item.type.name};
         },
       );
 
@@ -364,7 +403,10 @@ class McpActions {
             'url': {'type': 'string'},
             'name': {'type': 'string'},
             'status_code': {'type': 'integer'},
-            'headers': {'type': 'object', 'additionalProperties': {'type': 'string'}},
+            'headers': {
+              'type': 'object',
+              'additionalProperties': {'type': 'string'}
+            },
             'body': {'type': 'string'},
           },
           'required': ['url'],
@@ -386,16 +428,21 @@ class McpActions {
           );
           var mgr = await RequestMapManager.instance;
           await mgr.addRule(rule, item);
-          return {'created': true, 'index': mgr.rules.length - 1, 'url': url};
+          return {'created': true, 'id': rule.id, 'index': mgr.rules.length - 1, 'url': url};
         },
       );
 
   McpTool _removeMapRule() => McpTool(
         name: 'remove_map_rule',
-        description: 'Remove a map-local/script rule by index, or enable/disable mapping globally.',
+        description:
+            'Remove a map-local rule by id (see list_rules) or legacy index, or enable/disable mapping globally.',
         inputSchema: {
           'type': 'object',
-          'properties': {'index': {'type': 'integer'}, 'enabled': {'type': 'boolean'}},
+          'properties': {
+            'id': ruleIdSchema,
+            'index': ruleIndexSchema,
+            'enabled': {'type': 'boolean'}
+          },
         },
         handler: (a) async {
           var mgr = await RequestMapManager.instance;
@@ -404,35 +451,37 @@ class McpActions {
             await mgr.flushConfig();
             return {'enabled': mgr.enabled};
           }
-          var index = _int(a['index']);
-          if (index == null || index < 0 || index >= mgr.rules.length) throw ToolException('invalid index');
+          var index = resolveRuleIndex(mgr.rules, a, (e) => e.id, 'map-local rule');
+          var removed = mgr.rules[index];
           await mgr.deleteRule(index);
           await mgr.flushConfig();
-          return {'removed': true, 'index': index};
+          return {'removed': true, 'id': removed.id, 'index': index};
         },
       );
 
   McpTool _updateMapLocal() => McpTool(
         name: 'update_map_local',
         description:
-            'Update an existing map-local rule by index: its URL match and/or the locally served response (status/headers/body). Only the fields you pass change.',
+            'Update an existing map-local rule by id (see list_rules) or legacy index: its URL match and/or the locally served response (status/headers/body). Only the fields you pass change.',
         inputSchema: {
           'type': 'object',
           'properties': {
-            'index': {'type': 'integer'},
+            'id': ruleIdSchema,
+            'index': ruleIndexSchema,
             'url': {'type': 'string'},
             'name': {'type': 'string'},
             'status_code': {'type': 'integer'},
-            'headers': {'type': 'object', 'additionalProperties': {'type': 'string'}},
+            'headers': {
+              'type': 'object',
+              'additionalProperties': {'type': 'string'}
+            },
             'body': {'type': 'string'},
             'enabled': {'type': 'boolean'},
           },
-          'required': ['index'],
         },
         handler: (a) async {
           var mgr = await RequestMapManager.instance;
-          var index = _int(a['index']);
-          if (index == null || index < 0 || index >= mgr.rules.length) throw ToolException('invalid index');
+          var index = resolveRuleIndex(mgr.rules, a, (e) => e.id, 'map-local rule');
           var rule = mgr.rules[index];
           var item = await mgr.getMapItem(rule);
           if (item == null) throw ToolException('map item not found for rule $index');
@@ -445,7 +494,7 @@ class McpActions {
           if (a['body'] != null) item.body = a['body'].toString();
           if (a['enabled'] is bool) rule.enabled = a['enabled'] as bool;
           await mgr.updateRule(rule, item);
-          return {'updated': true, 'index': index, 'url': rule.url};
+          return {'updated': true, 'id': rule.id, 'index': index, 'url': rule.url};
         },
       );
 
@@ -454,7 +503,11 @@ class McpActions {
         description: 'Redirect (map remote) requests matching `url` wildcard to `target_url`.',
         inputSchema: {
           'type': 'object',
-          'properties': {'url': {'type': 'string'}, 'target_url': {'type': 'string'}, 'name': {'type': 'string'}},
+          'properties': {
+            'url': {'type': 'string'},
+            'target_url': {'type': 'string'},
+            'name': {'type': 'string'}
+          },
           'required': ['url', 'target_url'],
         },
         handler: (a) async {
@@ -468,16 +521,21 @@ class McpActions {
           var mgr = await RequestRewriteManager.instance;
           await mgr.addRule(rule, items);
           await mgr.flushRequestRewriteConfig();
-          return {'created': true, 'index': mgr.rules.length - 1, 'url': url, 'target': target};
+          return {'created': true, 'id': rule.id, 'index': mgr.rules.length - 1, 'url': url, 'target': target};
         },
       );
 
   McpTool _removeRewriteRule() => McpTool(
         name: 'remove_rewrite_rule',
-        description: 'Remove a rewrite/redirect rule by index (see list_rules), or enable/disable rewriting globally.',
+        description:
+            'Remove a rewrite/redirect rule by id (see list_rules) or legacy index, or enable/disable rewriting globally.',
         inputSchema: {
           'type': 'object',
-          'properties': {'index': {'type': 'integer'}, 'enabled': {'type': 'boolean'}},
+          'properties': {
+            'id': ruleIdSchema,
+            'index': ruleIndexSchema,
+            'enabled': {'type': 'boolean'}
+          },
         },
         handler: (a) async {
           var mgr = await RequestRewriteManager.instance;
@@ -486,33 +544,32 @@ class McpActions {
             await mgr.flushRequestRewriteConfig();
             return {'enabled': mgr.enabled};
           }
-          var index = _int(a['index']);
-          if (index == null || index < 0 || index >= mgr.rules.length) throw ToolException('invalid index');
+          var index = resolveRuleIndex(mgr.rules, a, (e) => e.id, 'rewrite rule');
+          var removed = mgr.rules[index];
           await mgr.removeIndex([index]);
           await mgr.flushRequestRewriteConfig();
-          return {'removed': true, 'index': index};
+          return {'removed': true, 'id': removed.id, 'index': index};
         },
       );
 
   McpTool _updateRedirect() => McpTool(
         name: 'update_redirect',
         description:
-            'Update an existing redirect rule by index: its URL wildcard match and/or target URL. Only the fields you pass change.',
+            'Update an existing redirect rule by id (see list_rules) or legacy index: its URL wildcard match and/or target URL. Only the fields you pass change.',
         inputSchema: {
           'type': 'object',
           'properties': {
-            'index': {'type': 'integer'},
+            'id': ruleIdSchema,
+            'index': ruleIndexSchema,
             'url': {'type': 'string'},
             'target_url': {'type': 'string'},
             'name': {'type': 'string'},
             'enabled': {'type': 'boolean'},
           },
-          'required': ['index'],
         },
         handler: (a) async {
           var mgr = await RequestRewriteManager.instance;
-          var index = _int(a['index']);
-          if (index == null || index < 0 || index >= mgr.rules.length) throw ToolException('invalid index');
+          var index = resolveRuleIndex(mgr.rules, a, (e) => e.id, 'redirect rule');
           var rule = mgr.rules[index];
           var items = await mgr.getRewriteItems(rule);
           if (a['url'] != null) rule.url = a['url'].toString();
@@ -526,7 +583,7 @@ class McpActions {
           }
           await mgr.updateRule(index, rule, items);
           await mgr.flushRequestRewriteConfig();
-          return {'updated': true, 'index': index, 'url': rule.url};
+          return {'updated': true, 'id': rule.id, 'index': index, 'url': rule.url};
         },
       );
 
@@ -564,10 +621,8 @@ class McpActions {
 
   /// 从操作推断规则类型；改参数类归 request，header/body 修改默认归 request
   static RuleType _inferRewriteType(List<RewriteItem> items) {
-    var hasRequestReplace = items.any((i) =>
-        _opsForRuleType(RuleType.requestReplace).contains(i.type));
-    var hasResponseReplace = items.any((i) =>
-        _opsForRuleType(RuleType.responseReplace).contains(i.type));
+    var hasRequestReplace = items.any((i) => _opsForRuleType(RuleType.requestReplace).contains(i.type));
+    var hasResponseReplace = items.any((i) => _opsForRuleType(RuleType.responseReplace).contains(i.type));
     if (hasRequestReplace && hasResponseReplace) {
       throw ToolException('cannot mix request and response replace ops in one rule; create two rules');
     }
@@ -663,7 +718,10 @@ class McpActions {
             'name': {'type': 'string'},
             'method': {'type': 'string', 'description': 'Optional HTTP method filter'},
             'enabled': {'type': 'boolean'},
-            'operations': {'type': 'array', 'items': {'type': 'object'}},
+            'operations': {
+              'type': 'array',
+              'items': {'type': 'object'}
+            },
           },
           'required': ['url'],
         },
@@ -682,8 +740,7 @@ class McpActions {
           var allowed = _opsForRuleType(type);
           var invalid = ops.where((o) => !allowed.contains(o.type)).toList();
           if (invalid.isNotEmpty) {
-            throw ToolException(
-                'ops not allowed for type ${type.name}: ${invalid.map((o) => o.type.name).join(', ')}');
+            throw ToolException('ops not allowed for type ${type.name}: ${invalid.map((o) => o.type.name).join(', ')}');
           }
 
           var rule = RequestRewriteRule(url: url, name: a['name']?.toString(), type: type);
@@ -693,35 +750,36 @@ class McpActions {
           var mgr = await RequestRewriteManager.instance;
           await mgr.addRule(rule, ops);
           await mgr.flushRequestRewriteConfig();
-          return {'created': true, 'index': mgr.rules.length - 1, 'type': type.name, 'url': url};
+          return {'created': true, 'id': rule.id, 'index': mgr.rules.length - 1, 'type': type.name, 'url': url};
         },
       );
 
   McpTool _updateRewrite() => McpTool(
         name: 'update_rewrite',
         description:
-            'Update a rewrite rule by index: URL wildcard, name, method, enabled, and/or replace its operations list. Only the fields you pass change; passing `operations` replaces the whole list. For redirect rules use update_redirect.',
+            'Update a rewrite rule by id (see list_rules) or legacy index: URL wildcard, name, method, enabled, and/or replace its operations list. Only the fields you pass change; passing `operations` replaces the whole list. For redirect rules use update_redirect.',
         inputSchema: {
           'type': 'object',
           'properties': {
-            'index': {'type': 'integer'},
+            'id': ruleIdSchema,
+            'index': ruleIndexSchema,
             'url': {'type': 'string'},
             'name': {'type': 'string'},
             'method': {'type': 'string'},
             'enabled': {'type': 'boolean'},
-            'operations': {'type': 'array', 'items': {'type': 'object'}},
+            'operations': {
+              'type': 'array',
+              'items': {'type': 'object'}
+            },
           },
-          'required': ['index'],
         },
         handler: (a) async {
           var mgr = await RequestRewriteManager.instance;
-          var index = _int(a['index']);
-          if (index == null || index < 0 || index >= mgr.rules.length) throw ToolException('invalid index');
+          var index = resolveRuleIndex(mgr.rules, a, (e) => e.id, 'rewrite rule');
           var rule = mgr.rules[index];
 
-          var items = a['operations'] != null
-              ? _parseRewriteOps(a['operations'])
-              : (await mgr.getRewriteItems(rule)) ?? [];
+          var items =
+              a['operations'] != null ? _parseRewriteOps(a['operations']) : (await mgr.getRewriteItems(rule)) ?? [];
           if (a['operations'] != null) {
             var allowed = _opsForRuleType(rule.type);
             var invalid = items.where((o) => !allowed.contains(o.type)).toList();
@@ -737,27 +795,28 @@ class McpActions {
 
           await mgr.updateRule(index, rule, items);
           await mgr.flushRequestRewriteConfig();
-          return {'updated': true, 'index': index, 'url': rule.url};
+          return {'updated': true, 'id': rule.id, 'index': index, 'url': rule.url};
         },
       );
 
   McpTool _getRewriteDetail() => McpTool(
         name: 'get_rewrite_detail',
-        description: 'Get one rewrite rule by index: URL, type, enabled, method and its operations list (op/key/value/use_regex/...).',
+        description:
+            'Get one rewrite rule by id (see list_rules) or legacy index: URL, type, enabled, method and its operations list (op/key/value/use_regex/...).',
         inputSchema: {
           'type': 'object',
           'properties': {
-            'index': {'type': 'integer'},
+            'id': ruleIdSchema,
+            'index': ruleIndexSchema,
           },
-          'required': ['index'],
         },
         handler: (a) async {
           var mgr = await RequestRewriteManager.instance;
-          var index = _int(a['index']);
-          if (index == null || index < 0 || index >= mgr.rules.length) throw ToolException('invalid index');
+          var index = resolveRuleIndex(mgr.rules, a, (e) => e.id, 'rewrite rule');
           var rule = mgr.rules[index];
           var items = await mgr.getRewriteItems(rule) ?? [];
           return {
+            'id': rule.id,
             'index': index,
             'name': rule.name,
             'url': rule.url,
@@ -804,7 +863,10 @@ class McpActions {
         inputSchema: {
           'type': 'object',
           'properties': {
-            'list': {'type': 'string', 'enum': ['whitelist', 'blacklist']},
+            'list': {
+              'type': 'string',
+              'enum': ['whitelist', 'blacklist']
+            },
             'pattern': {'type': 'string'},
           },
           'required': ['list', 'pattern'],
@@ -827,7 +889,10 @@ class McpActions {
         inputSchema: {
           'type': 'object',
           'properties': {
-            'list': {'type': 'string', 'enum': ['whitelist', 'blacklist']},
+            'list': {
+              'type': 'string',
+              'enum': ['whitelist', 'blacklist']
+            },
             'pattern': {'type': 'string'},
           },
           'required': ['list', 'pattern'],
@@ -850,7 +915,10 @@ class McpActions {
         inputSchema: {
           'type': 'object',
           'properties': {
-            'list': {'type': 'string', 'enum': ['whitelist', 'blacklist']},
+            'list': {
+              'type': 'string',
+              'enum': ['whitelist', 'blacklist']
+            },
             'enabled': {'type': 'boolean'},
           },
           'required': ['list', 'enabled'],
@@ -876,7 +944,10 @@ class McpActions {
             'urls': {
               'oneOf': [
                 {'type': 'string'},
-                {'type': 'array', 'items': {'type': 'string'}}
+                {
+                  'type': 'array',
+                  'items': {'type': 'string'}
+                }
               ]
             },
             'script': {'type': 'string'},
@@ -897,22 +968,26 @@ class McpActions {
           var mgr = await ScriptManager.instance;
           await mgr.addScript(item, a['script']?.toString());
           await mgr.flushConfig();
-          return {'created': true, 'index': mgr.list.length - 1, 'urls': item.urls};
+          return {'created': true, 'id': item.id, 'index': mgr.list.length - 1, 'urls': item.urls};
         },
       );
 
   McpTool _updateScript() => McpTool(
         name: 'update_script',
         description:
-            'Update an existing script rule by index: matching URLs, script body, name, enabled and/or remote_url. Only the fields you pass change.',
+            'Update an existing script rule by id (see list_rules) or legacy index: matching URLs, script body, name, enabled and/or remote_url. Only the fields you pass change.',
         inputSchema: {
           'type': 'object',
           'properties': {
-            'index': {'type': 'integer'},
+            'id': ruleIdSchema,
+            'index': ruleIndexSchema,
             'urls': {
               'oneOf': [
                 {'type': 'string'},
-                {'type': 'array', 'items': {'type': 'string'}}
+                {
+                  'type': 'array',
+                  'items': {'type': 'string'}
+                }
               ]
             },
             'script': {'type': 'string'},
@@ -920,19 +995,19 @@ class McpActions {
             'enabled': {'type': 'boolean'},
             'remote_url': {'type': 'string'},
           },
-          'required': ['index'],
         },
         handler: (a) async {
           var mgr = await ScriptManager.instance;
-          var index = _int(a['index']);
-          if (index == null || index < 0 || index >= mgr.list.length) throw ToolException('invalid index');
+          var index = resolveRuleIndex(mgr.list, a, (e) => e.id, 'script rule');
           var item = mgr.list[index];
           if (a['urls'] != null) {
             dynamic urls = a['urls'];
             var newUrls = urls is String
                 ? (urls.contains(',') ? urls.split(',').map((e) => e.trim()).toList() : [urls])
                 : (urls is List ? urls.map((e) => e.toString()).toList() : <String>[]);
-            item.urls..clear()..addAll(newUrls);
+            item.urls
+              ..clear()
+              ..addAll(newUrls);
             item.urlRegs = null;
           }
           if (a['name'] != null) item.name = a['name'].toString();
@@ -940,7 +1015,7 @@ class McpActions {
           if (a['remote_url'] != null) item.remoteUrl = a['remote_url'].toString();
           if (a['script'] != null) await mgr.updateScript(item, a['script'].toString());
           await mgr.flushConfig();
-          return {'updated': true, 'index': index, 'name': item.name, 'urls': item.urls};
+          return {'updated': true, 'id': item.id, 'index': index, 'name': item.name, 'urls': item.urls};
         },
       );
 
@@ -954,18 +1029,17 @@ class McpActions {
   McpTool _getScriptDetail() => McpTool(
         name: 'get_script_detail',
         description:
-            'Get one script rule by index: name, urls, enabled, remoteUrl and its full JavaScript body (for remote scripts, the fetched/cached body).',
+            'Get one script rule by id (see list_rules) or legacy index: name, urls, enabled, remoteUrl and its full JavaScript body (for remote scripts, the fetched/cached body).',
         inputSchema: {
           'type': 'object',
-          'properties': {'index': {'type': 'integer'}},
-          'required': ['index'],
+          'properties': {'id': ruleIdSchema, 'index': ruleIndexSchema},
         },
         handler: (a) async {
           var mgr = await ScriptManager.instance;
-          var index = _int(a['index']);
-          if (index == null || index < 0 || index >= mgr.list.length) throw ToolException('invalid index');
+          var index = resolveRuleIndex(mgr.list, a, (e) => e.id, 'script rule');
           var item = mgr.list[index];
           return {
+            'id': item.id,
             'index': index,
             'name': item.name,
             'urls': item.urls,
@@ -978,10 +1052,15 @@ class McpActions {
 
   McpTool _removeScript() => McpTool(
         name: 'remove_script',
-        description: 'Remove a script rule by index, or enable/disable scripting globally.',
+        description:
+            'Remove a script rule by id (see list_rules) or legacy index, or enable/disable scripting globally.',
         inputSchema: {
           'type': 'object',
-          'properties': {'index': {'type': 'integer'}, 'enabled': {'type': 'boolean'}},
+          'properties': {
+            'id': ruleIdSchema,
+            'index': ruleIndexSchema,
+            'enabled': {'type': 'boolean'}
+          },
         },
         handler: (a) async {
           var mgr = await ScriptManager.instance;
@@ -990,23 +1069,24 @@ class McpActions {
             await mgr.flushConfig();
             return {'enabled': mgr.enabled};
           }
-          var index = _int(a['index']);
-          if (index == null || index < 0 || index >= mgr.list.length) throw ToolException('invalid index');
+          var index = resolveRuleIndex(mgr.list, a, (e) => e.id, 'script rule');
+          var removed = mgr.list[index];
           await mgr.removeScript(index);
           await mgr.flushConfig();
-          return {'removed': true, 'index': index};
+          return {'removed': true, 'id': removed.id, 'index': index};
         },
       );
 
   // ------------------------------------------------------- environment
 
-  McpTool _toggleRecording() => McpTool(
-        name: 'toggle_recording',
-        description:
-            'Start or stop traffic recording by starting/stopping the local proxy server. When enabled=false the system proxy is restored and capture halts.',
+  McpTool _setRecording(String name, String description) => McpTool(
+        name: name,
+        description: description,
         inputSchema: {
           'type': 'object',
-          'properties': {'enabled': {'type': 'boolean'}},
+          'properties': {
+            'enabled': {'type': 'boolean'}
+          },
           'required': ['enabled'],
         },
         handler: (a) async {
@@ -1052,7 +1132,9 @@ class McpActions {
         description: 'Turn the operating-system HTTP/HTTPS proxy setting on or off (desktop only).',
         inputSchema: {
           'type': 'object',
-          'properties': {'enabled': {'type': 'boolean'}},
+          'properties': {
+            'enabled': {'type': 'boolean'}
+          },
           'required': ['enabled'],
         },
         handler: (a) async {
@@ -1142,7 +1224,10 @@ class McpActions {
             'curl': {'type': 'string'},
             'method': {'type': 'string'},
             'url': {'type': 'string'},
-            'headers': {'type': 'object', 'additionalProperties': {'type': 'string'}},
+            'headers': {
+              'type': 'object',
+              'additionalProperties': {'type': 'string'}
+            },
             'body': {'type': 'string'},
           },
         },
@@ -1166,7 +1251,8 @@ class McpActions {
 
   McpTool _addFavorite() => McpTool(
         name: 'add_favorite',
-        description: 'Save a captured flow (by id) to Favorites for later reuse. Pass history_id to favorite a flow from a saved history session.',
+        description:
+            'Save a captured flow (by id) to Favorites for later reuse. Pass history_id to favorite a flow from a saved history session.',
         inputSchema: {
           'type': 'object',
           'properties': {
@@ -1188,7 +1274,12 @@ class McpActions {
   McpTool _clearSession() => McpTool(
         name: 'clear_session',
         description: 'Clear all currently captured flows (both the MCP buffer and the app capture list). Destructive.',
-        inputSchema: {'type': 'object', 'properties': {'confirm': {'type': 'boolean'}}},
+        inputSchema: {
+          'type': 'object',
+          'properties': {
+            'confirm': {'type': 'boolean'}
+          }
+        },
         handler: (a) async {
           if (a['confirm'] != true) {
             throw ToolException('Pass confirm:true to clear the session');
@@ -1201,7 +1292,8 @@ class McpActions {
 
   McpTool _generateCode() => McpTool(
         name: 'generate_code',
-        description: 'Generate runnable code for a captured flow. language: curl (default), fetch (JS), or python (requests). Pass history_id to generate from a saved history session.',
+        description:
+            'Generate runnable code for a captured flow. language: curl (default), fetch (JS), or python (requests). Pass history_id to generate from a saved history session.',
         inputSchema: {
           'type': 'object',
           'properties': {
@@ -1210,7 +1302,10 @@ class McpActions {
               'type': 'integer',
               'description': 'Saved history session id from list_histories; omit for live capture'
             },
-            'language': {'type': 'string', 'enum': ['curl', 'fetch', 'python']},
+            'language': {
+              'type': 'string',
+              'enum': ['curl', 'fetch', 'python']
+            },
             'redact': {'type': 'boolean'},
           },
           'required': ['id'],

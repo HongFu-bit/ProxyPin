@@ -18,6 +18,7 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:proxypin/network/bin/configuration.dart';
+import 'package:proxypin/network/components/crypto_transparent.dart';
 import 'package:proxypin/network/components/hosts.dart';
 import 'package:proxypin/network/components/interceptor.dart';
 import 'package:proxypin/network/components/network_condition.dart';
@@ -84,6 +85,7 @@ class ProxyServer {
 
     List<Interceptor> interceptors = [
       Hosts(),
+      CryptoInterceptor(),
       RequestMapInterceptor.instance,
       RequestRewriteInterceptor.instance,
       ScriptInterceptor(),

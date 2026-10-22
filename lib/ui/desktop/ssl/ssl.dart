@@ -186,8 +186,8 @@ class _SslState extends State<SslWidget> {
                 String? path = (await Platforms.saveFileAdaptive(fileName: "ProxyPinKey.pem"));
                 if (path == null) return;
 
-                var keyFile = await CertificateManager.privateKeyFile();
-                await keyFile.copy(path);
+                var pem = await CertificateManager.privateKeyPem();
+                await File(path).writeAsString(pem);
               }),
         ],
         child: Padding(

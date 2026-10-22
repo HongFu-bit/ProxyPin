@@ -18,6 +18,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:proxypin/network/util/file_read.dart';
 import 'package:proxypin/network/util/logger.dart';
 import 'package:proxypin/utils/platform.dart';
 import 'package:path_provider/path_provider.dart';
@@ -112,6 +113,9 @@ class AppConfiguration {
   /// 导出给 AI 时是否脱敏 Authorization/Cookie
   bool mcpRedactEnabled = true;
 
+  /// 是否记录 MCP 工具调用审计（本地 JSONL，默认关闭）
+  bool mcpAuditEnabled = false;
+
   /// 移动端 LAN 模式的访问 token（桌面 loopback 不用，留空即可）
   String? mcpToken;
 
@@ -119,9 +123,16 @@ class AppConfiguration {
   /// 被占用时由服务回退到系统随机端口。
   int? mcpPort;
 
-  /// MCP 服务监听/显示地址。为 null/空时按平台自动（移动端用手机局域网 IP 并绑 0.0.0.0，
-  /// 桌面用 127.0.0.1）；移动端设置页可让用户自定义为任意 IP（如 127.0.0.1 只本机可达）。
+  /// MCP 服务监听/显示地址。为 null/空时按平台自动：移动端默认仅绑 127.0.0.1，
+  /// 开启 [mcpLanEnabled] 后绑 0.0.0.0；桌面绑 127.0.0.1。移动端设置页可自定义为任意 IP。
   String? mcpAddress;
+
+  /// 移动端是否允许局域网访问。默认关闭：仅监听 127.0.0.1、无需令牌；
+  /// 开启后监听 0.0.0.0 并要求 Bearer token。
+  bool mcpLanEnabled = false;
+
+  /// 移动端是否启用悬浮窗前台服务，避免系统冻结 App 导致 MCP 端口不可达
+  bool mcpFloatingEnabled = false;
 
   AppConfiguration._();
 
@@ -186,8 +197,8 @@ class AppConfiguration {
 
   Future<File> get _path async {
     if (Platforms.isDesktop()) {
-      var userHome = Platform.environment['HOME'] ?? Platform.environment['USERPROFILE'];
-      return File('$userHome${Platform.pathSeparator}.proxypin${Platform.pathSeparator}ui_config.json');
+      var home = await FileRead.homeDir();
+      return File('${home.path}${Platform.pathSeparator}ui_config.json');
     }
 
     final directory = await getApplicationSupportDirectory();
@@ -243,11 +254,14 @@ class AppConfiguration {
 
       mcpEnabled = config['mcpEnabled'] ?? false;
       mcpRedactEnabled = config['mcpRedactEnabled'] ?? true;
+      mcpAuditEnabled = config['mcpAuditEnabled'] ?? false;
       mcpToken = config['mcpToken'] as String?;
       var port = config['mcpPort'];
       mcpPort = port is int && port > 0 && port <= 65535 ? port : null;
       var address = config['mcpAddress'] as String?;
       mcpAddress = (address == null || address.trim().isEmpty) ? null : address.trim();
+      mcpLanEnabled = config['mcpLanEnabled'] ?? false;
+      mcpFloatingEnabled = config['mcpFloatingEnabled'] ?? false;
     } catch (e) {
       logger.e(e);
     }
@@ -296,9 +310,12 @@ class AppConfiguration {
       // MCP 配置所有平台都写入
       'mcpEnabled': mcpEnabled,
       'mcpRedactEnabled': mcpRedactEnabled,
+      'mcpAuditEnabled': mcpAuditEnabled,
       if (mcpToken != null) 'mcpToken': mcpToken,
       if (mcpPort != null) 'mcpPort': mcpPort,
       if (mcpAddress != null) 'mcpAddress': mcpAddress,
+      'mcpLanEnabled': mcpLanEnabled,
+      'mcpFloatingEnabled': mcpFloatingEnabled,
     };
   }
 }

@@ -5,6 +5,7 @@
 list(APPEND FLUTTER_PLUGIN_LIST
   desktop_multi_window
   flutter_js
+  flutter_secure_storage_linux
   proxy_manager
   screen_retriever_linux
   tray_manager

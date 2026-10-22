@@ -26,7 +26,8 @@ class McpClientNames {
   /// 桌面 App：stdio，本机拉起
   static const String desktop = 'proxypin_desktop';
 
-  /// 手机 App：局域网 Streamable HTTP + Bearer token
+  /// 手机 App：本机 Streamable HTTP（默认 127.0.0.1、免令牌）；
+  /// 开启「允许局域网访问」后绑 0.0.0.0 并要求 Bearer token
   static const String mobile = 'proxypin_mobile';
 
   /// 旧版本使用的名称，配置迁移时清理

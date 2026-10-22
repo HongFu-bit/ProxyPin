@@ -15,12 +15,14 @@
  */
 
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:proxypin/l10n/app_localizations.dart';
 import 'package:proxypin/mcp/mcp_names.dart';
 import 'package:proxypin/mcp/mcp_service.dart';
+import 'package:proxypin/native/floating_window.dart';
 import 'package:proxypin/network/bin/server.dart';
 import 'package:proxypin/ui/configuration.dart';
 import 'package:proxypin/ui/component/mcp_docs.dart';
@@ -65,14 +67,81 @@ class _MobileMcpSettingState extends State<MobileMcpSetting> {
 
   bool get _running => McpService.instance.isRunning;
 
-  /// 当前对外地址：用户自定义优先，否则用手机局域网 IP
-  String? get _host => (cfg.mcpAddress?.isNotEmpty ?? false) ? cfg.mcpAddress : _lanIp;
+  /// 当前对外地址：自定义优先；否则关闭局域网时 127.0.0.1，开启时手机局域网 IP
+  String? get _host {
+    var custom = cfg.mcpAddress;
+    if (custom != null && custom.isNotEmpty) return custom;
+    if (Platform.isAndroid || Platform.isIOS) {
+      return cfg.mcpLanEnabled ? _lanIp : '127.0.0.1';
+    }
+    return '127.0.0.1';
+  }
 
   String? get _endpoint {
     var host = _host;
     var port = McpService.instance.port;
     if (host == null || port == null) return null;
     return 'http://$host:$port/mcp';
+  }
+
+  /// 重启 MCP 服务并回填抓包索引（调用方负责确认当前正在运行）
+  Future<void> _restartService() async {
+    await McpService.instance.stop();
+    // stop() 会清空抓包索引，重启前回填当前列表，否则改配置后历史请求对 AI 不可见
+    McpService.instance.attach(widget.proxyServer, existing: MobileApp.container.source);
+    await McpService.instance.start(cfg);
+  }
+
+  /// 切换「允许局域网访问」：清除自定义地址覆盖，使开关立即生效
+  Future<void> _toggleLan(bool enabled) async {
+    var oldAddress = cfg.mcpAddress;
+    var oldLan = cfg.mcpLanEnabled;
+    var wasRunning = _running;
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+    cfg.mcpAddress = null;
+    cfg.mcpLanEnabled = enabled;
+    cfg.flushConfig();
+    try {
+      if (wasRunning) await _restartService();
+    } catch (e) {
+      // 绑定失败（如局域网不可用）时回滚，避免把不可用配置持久化
+      cfg.mcpAddress = oldAddress;
+      cfg.mcpLanEnabled = oldLan;
+      cfg.flushConfig();
+      _error = '${l.mcpStartFailed}: $e';
+      if (wasRunning) {
+        try {
+          await _restartService();
+        } catch (_) {}
+      }
+    }
+    if (mounted) setState(() => _busy = false);
+  }
+
+  /// 切换后台常驻悬浮窗（前台服务保活）
+  Future<void> _toggleFloating(bool enabled) async {
+    if (!Platform.isAndroid) return;
+    if (enabled) {
+      if (!await FloatingWindow.hasPermission()) {
+        await FloatingWindow.requestPermission();
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(content: Text(l.mcpOverlayPermissionRequired), duration: const Duration(seconds: 3)));
+        }
+        return;
+      }
+      if (!await FloatingWindow.start()) {
+        if (mounted) setState(() => _error = l.mcpOverlayPermissionRequired);
+        return;
+      }
+    } else {
+      await FloatingWindow.stop();
+    }
+    if (mounted) setState(() => cfg.mcpFloatingEnabled = enabled);
+    cfg.flushConfig();
   }
 
   Future<void> _toggle(bool enabled) async {
@@ -108,8 +177,7 @@ class _MobileMcpSettingState extends State<MobileMcpSetting> {
       _busy = true;
       _error = null;
     });
-    cfg.mcpToken = McpService.generateToken();
-    cfg.flushConfig();
+    await McpService.generateAndStoreToken(cfg);
     try {
       if (_running) {
         await McpService.instance.stop();
@@ -124,7 +192,7 @@ class _MobileMcpSettingState extends State<MobileMcpSetting> {
   }
 
   /// 修改监听地址与端口：写入配置，运行中则重启服务使新值生效。
-  /// 地址留空 = 按平台自动（手机局域网 IP，服务绑 0.0.0.0）。
+  /// 地址留空 = 按模式自动（关闭局域网时 127.0.0.1，开启时 0.0.0.0）。
   Future<void> _editEndpoint() async {
     var result = await McpEndpointDialog.show(
       context,
@@ -213,6 +281,26 @@ class _MobileMcpSettingState extends State<MobileMcpSetting> {
             padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
             child: _statusRow(cs),
           ),
+        ]),
+        const SizedBox(height: 12),
+        _card([
+          SwitchListTile(
+            value: cfg.mcpLanEnabled,
+            activeThumbColor: cs.primary,
+            onChanged: _busy ? null : _toggleLan,
+            title: Text(l.mcpLanAccess, style: const TextStyle(fontSize: 14)),
+            subtitle: Text(l.mcpLanAccessDescribe,
+                style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant, height: 1.4)),
+          ),
+          if (Platform.isAndroid)
+            SwitchListTile(
+              value: cfg.mcpFloatingEnabled,
+              activeThumbColor: cs.primary,
+              onChanged: _toggleFloating,
+              title: Text(l.mcpFloatingWindow, style: const TextStyle(fontSize: 14)),
+              subtitle: Text(l.mcpFloatingWindowDescribe,
+                  style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant, height: 1.4)),
+            ),
         ]),
         const SizedBox(height: 12),
         if (_running) ...[
@@ -304,6 +392,17 @@ class _MobileMcpSettingState extends State<MobileMcpSetting> {
             },
             title: Text(l.mcpRedact, style: const TextStyle(fontSize: 14)),
             subtitle: Text(l.mcpRedactDescribe,
+                style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant, height: 1.4)),
+          ),
+          SwitchListTile(
+            value: cfg.mcpAuditEnabled,
+            activeThumbColor: cs.primary,
+            onChanged: (v) {
+              setState(() => cfg.mcpAuditEnabled = v);
+              cfg.flushConfig();
+            },
+            title: Text(l.mcpAudit, style: const TextStyle(fontSize: 14)),
+            subtitle: Text(l.mcpAuditDescribe,
                 style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant, height: 1.4)),
           ),
         ]),

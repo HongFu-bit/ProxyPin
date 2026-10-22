@@ -25,6 +25,7 @@ import 'package:proxypin/network/util/cert/pkcs12.dart';
 import 'package:proxypin/network/util/cert/x509.dart';
 import 'package:proxypin/network/util/logger.dart';
 import 'package:proxypin/network/util/random.dart';
+import 'package:proxypin/security/secure_store.dart';
 import 'package:proxypin/utils/lang.dart';
 
 import 'cache.dart';
@@ -249,8 +250,7 @@ class CertificateManager {
 
     //私钥
     var serverPriKeyPem = CryptoUtils.encodeRSAPrivateKeyToPem(serverPriKey);
-    var keyFile = await privateKeyFile();
-    await keyFile.writeAsString(serverPriKeyPem);
+    await _storePrivateKeyPem(serverPriKeyPem);
     cleanCache();
     _state = StartState.uninitialized;
   }
@@ -260,8 +260,8 @@ class CertificateManager {
     var caFile = await certificateFile();
     await caFile.delete();
 
-    var keyFile = await privateKeyFile();
-    await keyFile.delete();
+    await SecureStore.deleteCaPrivateKey();
+    await _deleteLegacyKeyFile();
     cleanCache();
     _state = StartState.uninitialized;
     initCAConfig();
@@ -288,9 +288,8 @@ class CertificateManager {
       _caSubjectDnBytes = X509Utils.subjectDnBytesFromPem(caPem);
       //根据CA证书subject来动态生成目标服务器证书的issuer和subject
 
-      //从项目目录加入ca私钥
-      var keyFile = await privateKeyFile();
-      _caPriKey = CryptoUtils.rsaPrivateKeyFromPem(await keyFile.readAsString());
+      //从安全存储读取 ca 私钥；旧版本明文文件在首次读取时迁移
+      _caPriKey = CryptoUtils.rsaPrivateKeyFromPem(await privateKeyPem());
 
       _state = StartState.initialized;
       _initializationCompleter.complete();
@@ -323,10 +322,41 @@ class CertificateManager {
     return caFile.readAsString();
   }
 
-  /// 私钥文件
+  /// CA 私钥 PEM：安全存储优先；缺失时读取旧明文文件并迁移（成功后删除明文）。
+  static Future<String> privateKeyPem() async {
+    var stored = await SecureStore.readCaPrivateKey();
+    if (stored != null) return stored;
+
+    var keyFile = await privateKeyFile();
+    var pem = await keyFile.readAsString();
+    if (await SecureStore.writeCaPrivateKey(pem)) {
+      await _deleteLegacyKeyFile();
+    }
+    return pem;
+  }
+
+  /// 写入 CA 私钥：优先安全存储，不可用时退回明文文件。
+  static Future<void> _storePrivateKeyPem(String pem) async {
+    if (await SecureStore.writeCaPrivateKey(pem)) {
+      await _deleteLegacyKeyFile();
+      return;
+    }
+    var keyFile = await privateKeyFile();
+    await keyFile.writeAsString(pem);
+  }
+
+  static Future<void> _deleteLegacyKeyFile() async {
+    try {
+      var keyFile = await _legacyPrivateKeyFile();
+      if (await keyFile.exists()) await keyFile.delete();
+    } catch (e) {
+      logger.w('remove legacy CA key file failed: $e');
+    }
+  }
+
+  /// 旧版明文私钥文件（含首次从 assets 播种）。仅用于迁移与兼容，不用于日常读取。
   static Future<File> privateKeyFile() async {
-    final String appPath = await getApplicationSupportDirectory().then((value) => value.path);
-    var caFile = File("$appPath${Platform.pathSeparator}ca_key.pem");
+    var caFile = await _legacyPrivateKeyFile();
     if (!(await caFile.exists())) {
       var body = await FileRead.read('assets/certs/ca_key.pem');
       await caFile.writeAsBytes(body.buffer.asUint8List());
@@ -335,11 +365,15 @@ class CertificateManager {
     return caFile;
   }
 
+  static Future<File> _legacyPrivateKeyFile() async {
+    final String appPath = await getApplicationSupportDirectory().then((value) => value.path);
+    return File("$appPath${Platform.pathSeparator}ca_key.pem");
+  }
+
   ///生成 p12文件
   static Future<Uint8List> generatePkcs12(String? password) async {
     var caFile = await CertificateManager.certificateFile();
-    var keyFile = await CertificateManager.privateKeyFile();
-    return Pkcs12.generatePkcs12(await keyFile.readAsString(), [await caFile.readAsString()], password: password);
+    return Pkcs12.generatePkcs12(await privateKeyPem(), [await caFile.readAsString()], password: password);
   }
 
   ///import p12文件
@@ -347,12 +381,11 @@ class CertificateManager {
     var decodePkcs12 = Pkcs12.parsePkcs12(pkcs12, password: password);
 
     var caFile = await CertificateManager.certificateFile();
-    var keyFile = await CertificateManager.privateKeyFile();
     if (decodePkcs12.length != 2) {
       throw Exception('Invalid pkcs12 file');
     }
 
-    await keyFile.writeAsString(decodePkcs12[0]);
+    await _storePrivateKeyPem(decodePkcs12[0]);
     await caFile.writeAsString(decodePkcs12[1]);
 
     cleanCache();

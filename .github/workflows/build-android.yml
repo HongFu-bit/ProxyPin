@@ -64,6 +64,16 @@ jobs:
       - name: flutter pub get
         run: flutter pub get
 
+      # 静态检查与 MCP 相关单测在打包前跑，避免把编译不过的提交打成 APK。
+      # --no-fatal-infos/--no-fatal-warnings：只让 error 阻塞构建。
+      # 上游仍有 4 条既存 warning（hpack/compress/desktop_update/replay_connect），
+      # 以及 200+ 条历史 info，均与本 fork 改动无关。
+      - name: flutter analyze
+        run: flutter analyze --no-fatal-infos --no-fatal-warnings
+
+      - name: flutter test (MCP)
+        run: flutter test test/mcp_extra_test.dart test/mcp_flow_test.dart test/mcp_http_setup_test.dart
+
       - name: Build release APK
         run: flutter build apk --release
 

@@ -11,8 +11,23 @@ import 'package:proxypin/ui/component/multi_window.dart';
 
 import '../http/http_headers.dart';
 
+/// 外部断点处理器（如 MCP 交互式拦截）。
+///
+/// 与 UI 编辑窗口竞速：外部先返回则 UI 窗口的[Completer]被代为完成，
+/// UI 先完成则调用 [cancel] 清理外部挂起项。返回 null 表示丢弃该请求/响应。
+abstract class BreakpointExternalHandler {
+  Future<HttpRequest?> onRequestPaused(String requestId, HttpRequest request);
+
+  Future<HttpResponse?> onResponsePaused(String requestId, HttpRequest request, HttpResponse response);
+
+  void cancel(String requestId, {required bool response});
+}
+
 class RequestBreakpointInterceptor extends Interceptor {
   static RequestBreakpointInterceptor instance = RequestBreakpointInterceptor._();
+
+  /// 由 MCP 服务启停时注册/注销；为空时保持原有 UI-only 行为
+  static BreakpointExternalHandler? externalHandler;
 
   final manager = RequestBreakpointManager.instance;
 
@@ -99,7 +114,7 @@ class RequestBreakpointInterceptor extends Interceptor {
         MultiWindow.openWindow("Breakpoint - Request", 'BreakpointExecutor',
             args: {'type': 'request', 'request': request.toJson(), 'requestId': request.requestId});
 
-        return completer.future.then((req) {
+        return _awaitExternalRequest(request.requestId, request, completer).then((req) {
           if (req == null) {
             logger.d('Request ${request.requestId} was resumed null, aborting request');
             return null;
@@ -148,7 +163,7 @@ class RequestBreakpointInterceptor extends Interceptor {
           'requestId': request.requestId
         });
 
-        return completer.future.then((res) {
+        return _awaitExternalResponse(request.requestId, request, response, completer).then((res) {
           if (res == null) {
             return null;
           }
@@ -169,15 +184,70 @@ class RequestBreakpointInterceptor extends Interceptor {
     return response;
   }
 
+  /// 等待 UI 或外部处理器中的任意一方先给出结果。
+  /// 外部处理器异常时按原样放行，不能让断点钩子把业务请求打断。
+  Future<HttpRequest?> _awaitExternalRequest(
+      String requestId, HttpRequest request, Completer<HttpRequest?> uiCompleter) async {
+    var handler = externalHandler;
+    if (handler == null) return uiCompleter.future;
+
+    HttpRequest? result;
+    try {
+      result = await Future.any<HttpRequest?>([
+        uiCompleter.future,
+        handler.onRequestPaused(requestId, request).catchError((Object e, StackTrace st) {
+          logger.e('External breakpoint handler failed for request $requestId', error: e, stackTrace: st);
+          return request.copy();
+        }),
+      ]);
+    } finally {
+      _pausedRequests.remove(requestId);
+      if (uiCompleter.isCompleted) {
+        handler.cancel(requestId, response: false);
+      } else {
+        // 外部先处置：代为完成 UI completer，避免窗口/等待协程悬挂
+        uiCompleter.complete(result);
+      }
+    }
+    return result;
+  }
+
+  Future<HttpResponse?> _awaitExternalResponse(String requestId, HttpRequest request, HttpResponse response,
+      Completer<HttpResponse?> uiCompleter) async {
+    var handler = externalHandler;
+    if (handler == null) return uiCompleter.future;
+
+    HttpResponse? result;
+    try {
+      result = await Future.any<HttpResponse?>([
+        uiCompleter.future,
+        handler.onResponsePaused(requestId, request, response).catchError((Object e, StackTrace st) {
+          logger.e('External breakpoint handler failed for response $requestId', error: e, stackTrace: st);
+          return response.copy();
+        }),
+      ]);
+    } finally {
+      _pausedResponses.remove(requestId);
+      if (uiCompleter.isCompleted) {
+        handler.cancel(requestId, response: true);
+      } else {
+        uiCompleter.complete(result);
+      }
+    }
+    return result;
+  }
+
   void resumeRequest(String requestId, HttpRequest? request) {
-    if (_pausedRequests.containsKey(requestId)) {
-      _pausedRequests.remove(requestId)?.complete(request);
+    var completer = _pausedRequests.remove(requestId);
+    if (completer != null && !completer.isCompleted) {
+      completer.complete(request);
     }
   }
 
   void resumeResponse(String requestId, HttpResponse? response) {
-    if (_pausedResponses.containsKey(requestId)) {
-      _pausedResponses.remove(requestId)?.complete(response);
+    var completer = _pausedResponses.remove(requestId);
+    if (completer != null && !completer.isCompleted) {
+      completer.complete(response);
     }
   }
 }

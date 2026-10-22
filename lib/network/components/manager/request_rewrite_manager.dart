@@ -66,6 +66,10 @@ class RequestRewriteManager {
         logger.e('加载请求重写配置失败 $element', error: e);
       }
     }
+    // 旧配置没有 id：生成后立即回写，保证跨重启稳定
+    if (list.any((e) => e is Map && (e['id'] == null || e['id'].toString().isEmpty))) {
+      await flushRequestRewriteConfig();
+    }
   }
 
   ///重新加载请求重写

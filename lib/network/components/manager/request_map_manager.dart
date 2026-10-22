@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:proxypin/storage/path.dart';
+import 'package:proxypin/utils/rule_id.dart';
 
 import '../../util/logger.dart';
 import '../../util/random.dart';
@@ -117,9 +118,17 @@ class RequestMapManager {
       }
       var config = jsonDecode(content);
       enabled = config['enabled'] == true;
-      for (var entry in config['list']) {
+      var rawList = config['list'] as List? ?? [];
+      for (var entry in rawList) {
         list.add(RequestMapRule.fromJson(entry));
       }
+      rules = list;
+      _mapItemsCache.clear();
+      // 旧配置没有 id：生成后立即回写，保证跨重启稳定
+      if (rawList.any((e) => e is Map && (e['id'] == null || e['id'].toString().isEmpty))) {
+        await flushConfig();
+      }
+      return;
     }
     rules = list;
     _mapItemsCache.clear();
@@ -157,6 +166,8 @@ enum RequestMapType {
 }
 
 class RequestMapRule {
+  /// 稳定标识，供 MCP 等外部调用方寻址；旧配置缺省时自动生成并回写。
+  final String id;
   bool enabled;
   RequestMapType type;
 
@@ -165,8 +176,9 @@ class RequestMapRule {
   RegExp _urlReg;
   String? itemPath;
 
-  RequestMapRule({this.enabled = true, this.name, required this.url, required this.type, this.itemPath})
-      : _urlReg = UrlPattern.toRegExp(url);
+  RequestMapRule({String? id, this.enabled = true, this.name, required this.url, required this.type, this.itemPath})
+      : id = id ?? newRuleId(),
+        _urlReg = UrlPattern.toRegExp(url);
 
   bool match(String url) {
     if (enabled) {
@@ -178,6 +190,7 @@ class RequestMapRule {
   /// 从json中创建
   factory RequestMapRule.fromJson(Map<dynamic, dynamic> map) {
     return RequestMapRule(
+        id: map['id']?.toString(),
         enabled: map['enabled'] == true,
         name: map['name'],
         url: map['url'],
@@ -191,6 +204,7 @@ class RequestMapRule {
 
   Map<String, Object?> toJson() {
     return {
+      'id': id,
       'name': name,
       'enabled': enabled,
       'url': url,
