@@ -131,7 +131,10 @@ class McpServer {
           'unresolved items auto-continue before expiresAtMs. Breakpoints only fire for '
           'traffic attributed to an app process (VPN mode): shell/adb/root requests have '
           'no uid and are bypassed by design, so test with a real app instead of curl '
-          'through the proxy port.',
+          'through the proxy port. Tool argument names are normalized: camelCase and '
+          'snake_case are interchangeable for any declared parameter (apkPath=apk_path, '
+          'historyId=history_id, sampleLimit=sample_limit); legacy aliases flowId=flow_id=id '
+          'and urlPattern=url are also accepted.',
     };
   }
 

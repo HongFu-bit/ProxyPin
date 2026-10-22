@@ -1,5 +1,7 @@
 package com.network.proxy
 
+import android.animation.Animator
+import android.animation.AnimatorListenerAdapter
 import android.animation.ValueAnimator
 import android.app.Notification
 import android.app.NotificationChannel
@@ -32,6 +34,8 @@ import kotlin.math.abs
  * 避免 ProxyPin 退到后台后被系统判定为 cached 进程而冻结
  * （表现为 MCP 端口仍在 LISTEN，但连接方停在 SYN_SENT）。
  *
+ * 无操作 5 秒后气泡完全隐藏（服务与通知继续运行），点通知栏即可唤回。
+ *
  * 需要 SYSTEM_ALERT_WINDOW 权限；服务本身通过常驻通知维持前台优先级。
  */
 class FloatingWindowService : Service() {
@@ -40,10 +44,18 @@ class FloatingWindowService : Service() {
         private const val TAG = "FloatingWindow"
         private const val CHANNEL_ID = "proxypin_mcp_keepalive"
         private const val NOTIFICATION_ID = 9127
+        private const val ACTION_SHOW = "com.network.proxy.action.SHOW_FLOATING"
 
-        /** 气泡直径；比初版 56dp 更小，减少遮挡 */
+        /** 气泡直径 */
         private const val BUBBLE_DP = 46
-        private const val EDGE_MARGIN_DP = 2
+
+        /** 气泡与屏幕边缘的间距，避免紧贴屏幕边缘 */
+        private const val EDGE_MARGIN_DP = 10
+
+        /** 无操作多久后自动隐藏 */
+        private const val AUTO_HIDE_MS = 5000L
+
+        private const val FADE_MS = 120L
 
         @Volatile
         var isRunning: Boolean = false
@@ -70,6 +82,9 @@ class FloatingWindowService : Service() {
     private var windowManager: WindowManager? = null
     private var bubble: View? = null
     private var snapAnimator: ValueAnimator? = null
+    private var fadeAnimator: ValueAnimator? = null
+    private var autoHideRunnable: Runnable? = null
+    private var hidden = false
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -81,12 +96,19 @@ class FloatingWindowService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        // 被系统回收后重建：尽量恢复气泡
-        if (bubble == null) addOverlay()
+        if (intent?.action == ACTION_SHOW) {
+            showBubble()
+            return START_STICKY
+        }
+        // 被系统回收后重建：恢复气泡；用户主动隐藏的保持隐藏
+        if (bubble == null && !hidden) addOverlay()
         return START_STICKY
     }
 
     override fun onDestroy() {
+        cancelAutoHide()
+        fadeAnimator?.cancel()
+        fadeAnimator = null
         snapAnimator?.cancel()
         snapAnimator = null
         removeOverlay()
@@ -96,10 +118,11 @@ class FloatingWindowService : Service() {
 
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
-        // 旋转/分屏后保持贴边，避免气泡留在屏幕外
+        // 旋转/分屏后重新贴边，避免气泡留在屏幕外
         val view = bubble ?: return
         val params = view.layoutParams as? WindowManager.LayoutParams ?: return
         snapToEdge(view, params)
+        scheduleAutoHide(view)
     }
 
     private fun startForegroundCompat() {
@@ -127,6 +150,12 @@ class FloatingWindowService : Service() {
                 )
             }
         }
+        val showIntent = PendingIntent.getService(
+            this,
+            1,
+            Intent(this, FloatingWindowService::class.java).apply { action = ACTION_SHOW },
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
         val openIntent = PendingIntent.getActivity(
             this,
             0,
@@ -141,13 +170,25 @@ class FloatingWindowService : Service() {
             @Suppress("DEPRECATION")
             Notification.Builder(this)
         }
+        @Suppress("DEPRECATION")
+        builder.addAction(android.R.drawable.ic_menu_view, "显示悬浮窗", showIntent)
+        @Suppress("DEPRECATION")
+        builder.addAction(android.R.drawable.ic_menu_edit, "打开应用", openIntent)
         return builder
             .setContentTitle("ProxyPin MCP 运行中")
-            .setContentText("悬浮窗保活中，点击打开应用")
+            .setContentText(
+                if (hidden) "悬浮窗已隐藏，点击通知恢复" else "悬浮窗保活中，5 秒后自动隐藏"
+            )
             .setSmallIcon(android.R.drawable.stat_notify_sync)
             .setOngoing(true)
-            .setContentIntent(openIntent)
+            .setOnlyAlertOnce(true)
+            .setContentIntent(showIntent)
             .build()
+    }
+
+    private fun updateNotification() {
+        val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        runCatching { manager.notify(NOTIFICATION_ID, buildNotification()) }
     }
 
     private fun addOverlay() {
@@ -186,11 +227,8 @@ class FloatingWindowService : Service() {
         ).apply {
             gravity = Gravity.TOP or Gravity.START
             val bounds = screenBounds()
-            val minX = dp(EDGE_MARGIN_DP)
-            x = (bounds.width() - size - minX).coerceAtLeast(minX)
-            val minY = topInset() + dp(4)
-            val maxY = (bounds.height() - bottomInset() - size - dp(8)).coerceAtLeast(minY)
-            y = dp(220).coerceIn(minY, maxY)
+            x = maxX(size, bounds)
+            y = dp(220).coerceIn(minY(), maxY(size, bounds))
         }
 
         var downRawX = 0f
@@ -203,6 +241,13 @@ class FloatingWindowService : Service() {
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
                     snapAnimator?.cancel()
+                    fadeAnimator?.cancel()
+                    view.alpha = 1f
+                    if (hidden) {
+                        hidden = false
+                        updateNotification()
+                    }
+                    cancelAutoHide()
                     downRawX = event.rawX
                     downRawY = event.rawY
                     startX = params.x
@@ -217,12 +262,8 @@ class FloatingWindowService : Service() {
                     val dy = (event.rawY - downRawY).toInt()
                     if (abs(dx) > dp(4) || abs(dy) > dp(4)) moved = true
                     val bounds = screenBounds()
-                    val minX = dp(EDGE_MARGIN_DP)
-                    val maxX = (bounds.width() - params.width - dp(EDGE_MARGIN_DP)).coerceAtLeast(minX)
-                    val minY = topInset() + dp(4)
-                    val maxY = (bounds.height() - bottomInset() - params.height - dp(8)).coerceAtLeast(minY)
-                    params.x = (startX + dx).coerceIn(minX, maxX)
-                    params.y = (startY + dy).coerceIn(minY, maxY)
+                    params.x = (startX + dx).coerceIn(minX(), maxX(params.width, bounds))
+                    params.y = (startY + dy).coerceIn(minY(), maxY(params.height, bounds))
                     runCatching { wm.updateViewLayout(view, params) }
                     true
                 }
@@ -230,9 +271,15 @@ class FloatingWindowService : Service() {
                 MotionEvent.ACTION_UP -> {
                     if (!moved && System.currentTimeMillis() - downAt < 400) {
                         openApp()
-                    } else {
-                        snapToEdge(view, params)
                     }
+                    snapToEdge(view, params)
+                    scheduleAutoHide(view)
+                    true
+                }
+
+                MotionEvent.ACTION_CANCEL -> {
+                    snapToEdge(view, params)
+                    scheduleAutoHide(view)
                     true
                 }
 
@@ -243,6 +290,7 @@ class FloatingWindowService : Service() {
         try {
             wm.addView(view, params)
             bubble = view
+            scheduleAutoHide(view)
         } catch (e: Exception) {
             Log.w(TAG, "add overlay failed", e)
         }
@@ -254,16 +302,13 @@ class FloatingWindowService : Service() {
         runCatching { windowManager?.removeView(view) }
     }
 
-    /** 松手后吸附到最近的一侧，并限制在系统栏内 */
+    /** 松手后吸附到最近的一侧，并与屏幕边缘保持间距 */
     private fun snapToEdge(view: View, params: WindowManager.LayoutParams) {
         val wm = windowManager ?: return
         val bounds = screenBounds()
-        val minX = dp(EDGE_MARGIN_DP)
-        val maxX = (bounds.width() - params.width - dp(EDGE_MARGIN_DP)).coerceAtLeast(minX)
-        val minY = topInset() + dp(4)
-        val maxY = (bounds.height() - bottomInset() - params.height - dp(8)).coerceAtLeast(minY)
-        val targetX = if (params.x + params.width / 2 < bounds.width() / 2) minX else maxX
-        val targetY = params.y.coerceIn(minY, maxY)
+        val targetX =
+            if (params.x + params.width / 2 < bounds.width() / 2) minX() else maxX(params.width, bounds)
+        val targetY = params.y.coerceIn(minY(), maxY(params.height, bounds))
         val startX = params.x
         val startY = params.y
         if (startX == targetX && startY == targetY) return
@@ -281,6 +326,77 @@ class FloatingWindowService : Service() {
             start()
         }
     }
+
+    /** 无操作后完全隐藏气泡；前台服务与通知保持运行，点通知可唤回 */
+    private fun hideBubble(view: View) {
+        if (hidden) return
+        hidden = true
+        cancelAutoHide()
+        updateNotification()
+        fade(view, 1f, 0f) {
+            if (hidden) removeOverlay()
+        }
+    }
+
+    /** 从通知栏唤回气泡 */
+    private fun showBubble() {
+        hidden = false
+        val view = bubble
+        if (view == null) {
+            addOverlay()
+            if (bubble == null) hidden = true
+        } else {
+            scheduleAutoHide(view)
+        }
+        updateNotification()
+    }
+
+    private fun fade(view: View, from: Float, to: Float, onEnd: (() -> Unit)? = null) {
+        fadeAnimator?.cancel()
+        view.alpha = from
+        fadeAnimator = ValueAnimator.ofFloat(from, to).apply {
+            duration = FADE_MS
+            addUpdateListener { view.alpha = it.animatedValue as Float }
+            addListener(object : AnimatorListenerAdapter() {
+                private var canceled = false
+
+                override fun onAnimationCancel(animation: Animator) {
+                    canceled = true
+                }
+
+                override fun onAnimationEnd(animation: Animator) {
+                    if (!canceled) onEnd?.invoke()
+                }
+            })
+            start()
+        }
+    }
+
+    private fun scheduleAutoHide(view: View) {
+        cancelAutoHide()
+        val runnable = Runnable {
+            autoHideRunnable = null
+            hideBubble(view)
+        }
+        autoHideRunnable = runnable
+        view.postDelayed(runnable, AUTO_HIDE_MS)
+    }
+
+    private fun cancelAutoHide() {
+        val runnable = autoHideRunnable ?: return
+        bubble?.removeCallbacks(runnable)
+        autoHideRunnable = null
+    }
+
+    private fun minX(): Int = dp(EDGE_MARGIN_DP)
+
+    private fun maxX(width: Int, bounds: Rect): Int =
+        (bounds.width() - width - dp(EDGE_MARGIN_DP)).coerceAtLeast(minX())
+
+    private fun minY(): Int = topInset() + dp(EDGE_MARGIN_DP)
+
+    private fun maxY(height: Int, bounds: Rect): Int =
+        (bounds.height() - bottomInset() - height - dp(EDGE_MARGIN_DP)).coerceAtLeast(minY())
 
     private fun screenBounds(): Rect {
         val wm = windowManager

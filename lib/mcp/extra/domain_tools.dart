@@ -109,7 +109,7 @@ class DomainToolGenerator {
     }
 
     var prefix = _prefix(host, registerAs);
-    var crypto = _resolveCrypto(cryptoProfile, warnings);
+    var crypto = _resolveCrypto(cryptoProfile, host, warnings);
     var explicitSignature = _parseSignatureProfile(signatureProfile, warnings);
 
     var usedNames = <String>{};
@@ -127,6 +127,20 @@ class DomainToolGenerator {
       if (recipe != null && recipe.input != 'sorted-pairs' && recipe.input != 'sorted-concat') {
         warnings.add('$name: signature recipe "${recipe.input}" is reconstructed best-effort; '
             'verify a real call before trusting it');
+      }
+      if (recipe == null && signatureProfile?.toString() != 'none') {
+        String? signatureField;
+        for (var param in endpoint.params) {
+          if (_looksLikeSignature(param.name)) {
+            signatureField = param.name;
+            break;
+          }
+        }
+        if (signatureField != null) {
+          warnings.add('$name: "$signatureField" looks like a signature but no signature profile is bound; '
+              'captured values are reused, so changing other parameters may fail with 401/403. '
+              'Pass signatureProfile="auto" or an explicit recipe to recompute it.');
+        }
       }
 
       var handler = _buildHandler(
@@ -298,6 +312,7 @@ class DomainToolGenerator {
           ? 'No signature recomputation: captured signature values are reused, so changing signed fields may fail.'
           : 'Recomputes "${signature.field}" with ${signature.algorithm}(${signature.input}) best-effort.',
       if (crypto != null) 'Decrypts the response with crypto profile "${crypto.name}" when possible.',
+      'The echoed request URL is redacted for sensitive fields; the request itself is sent with original values.',
     ];
     return scope.join(' ');
   }
@@ -493,6 +508,9 @@ class DomainToolGenerator {
     var prepared = _prepare(endpoint, signature, args);
     var request = prepared.request;
     var signatureInfo = prepared.signatureInfo;
+    // 只对回显做脱敏；request 本身保持原值发送
+    var echoedUrl = _maskUrl(request.requestUrl);
+    var echoRedacted = echoedUrl != request.requestUrl;
 
     ProxyInfo? proxyInfo;
 
@@ -509,7 +527,7 @@ class DomainToolGenerator {
       watch.stop();
       return {
         'tool': name,
-        'request': {'method': endpoint.method, 'url': _maskUrl(request.requestUrl)},
+        'request': {'method': endpoint.method, 'url': echoedUrl, 'redacted': echoRedacted},
         if (signatureInfo.isNotEmpty) 'signature': signatureInfo,
         'error': 'request failed: $e',
         'elapsedMs': watch.elapsedMilliseconds,
@@ -551,7 +569,7 @@ class DomainToolGenerator {
 
     return {
       'tool': name,
-      'request': {'method': endpoint.method, 'url': _maskUrl(request.requestUrl)},
+      'request': {'method': endpoint.method, 'url': echoedUrl, 'redacted': echoRedacted},
       if (signatureInfo.isNotEmpty) 'signature': signatureInfo,
       'status': response.status.code,
       'statusText': response.status.reasonPhrase,
@@ -675,17 +693,32 @@ class DomainToolGenerator {
   static String _hex(List<int> bytes) =>
       bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
 
-  static CryptoProfile? _resolveCrypto(String? name, List<String> warnings) {
-    if (name == null || name.isEmpty) return null;
-    var profile = CryptoProfileStore.instance.byName(name);
-    if (profile == null) {
-      warnings.add('crypto profile "$name" not found; responses will not be decrypted');
-      return null;
+  static CryptoProfile? _resolveCrypto(String? name, String host, List<String> warnings) {
+    if (name != null && name.isNotEmpty) {
+      var profile = CryptoProfileStore.instance.byName(name);
+      if (profile == null) {
+        warnings.add('crypto profile "$name" not found; responses will not be decrypted');
+        return null;
+      }
+      if (!profile.enabled) {
+        warnings.add('crypto profile "$name" is disabled; responses will not be decrypted');
+      }
+      return profile;
     }
-    if (!profile.enabled) {
-      warnings.add('crypto profile "$name" is disabled; responses will not be decrypted');
+    // 未显式指定时，按 host 自动绑定唯一匹配的加密档（只影响响应解密，失败会回退原文）
+    var matched = CryptoProfileStore.instance.profiles
+        .where((profile) => profile.enabled && profile.applyTo.hostPattern.isNotEmpty &&
+            profile.applyTo.matchesHost(host))
+        .toList();
+    if (matched.length == 1) {
+      warnings.add('crypto profile "${matched.first.name}" matches host "$host" and was bound automatically; '
+          'pass cryptoProfile to override');
+      return matched.first;
     }
-    return profile;
+    if (matched.length > 1) {
+      warnings.add('${matched.length} crypto profiles match host "$host"; pass cryptoProfile to choose one');
+    }
+    return null;
   }
 
   // ---------------------------------------------------------------- helpers
@@ -733,6 +766,18 @@ class DomainToolGenerator {
   static String _queryString(Map<String, String> query) => query.entries
       .map((e) => '${Uri.encodeQueryComponent(e.key)}=${Uri.encodeQueryComponent(e.value)}')
       .join('&');
+
+  /// 只认签名类字段名，用于在未绑定签名算法时给出告警
+  static bool _looksLikeSignature(String name) {
+    var lower = name.toLowerCase();
+    return lower == 'sign' ||
+        lower == 'signature' ||
+        lower == 'sig' ||
+        lower.endsWith('_sign') ||
+        lower.endsWith('-sign') ||
+        lower.endsWith('_sig') ||
+        lower.contains('signature');
+  }
 
   static bool _sensitiveName(String name) {
     var lower = name.toLowerCase();

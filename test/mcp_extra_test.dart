@@ -13,6 +13,7 @@ import 'package:proxypin/mcp/extra/active_tools.dart';
 import 'package:proxypin/mcp/extra/audit_log.dart';
 import 'package:proxypin/mcp/extra/codec_detector.dart';
 import 'package:proxypin/mcp/extra/contract_generator.dart';
+import 'package:proxypin/mcp/extra/domain_tools.dart';
 import 'package:proxypin/mcp/extra/extra_tools.dart';
 import 'package:proxypin/mcp/extra/field_flow_tracker.dart';
 import 'package:proxypin/mcp/extra/flow_broadcaster.dart';
@@ -23,6 +24,7 @@ import 'package:proxypin/mcp/extra/signature_analyzer.dart';
 import 'package:proxypin/mcp/protocol/mcp_server.dart';
 import 'package:proxypin/mcp/protocol/mcp_tool.dart';
 import 'package:proxypin/mcp/transport/mcp_http_server.dart';
+import 'package:proxypin/network/components/crypto_transparent.dart';
 import 'package:proxypin/network/http/http.dart';
 import 'package:proxypin/network/util/crypto.dart';
 import 'package:proxypin/ui/configuration.dart';
@@ -716,6 +718,40 @@ void main() {
 
     var remove = tools.firstWhere((item) => item.name == 'remove_domain_tools');
     await expectLater(remove.handler({}), throwsA(isA<ToolException>()));
+  });
+
+  test('domain tools send original signature values and warn when unbound', () async {
+    var dir = await io.Directory.systemTemp.createTemp('proxypin_domain_');
+    try {
+      CryptoProfileStore.instance.fileProvider =
+          () async => io.File('${dir.path}/crypto_profiles.json');
+      CryptoProfileStore.instance.profiles.clear();
+      await CryptoProfileStore.instance.ensureLoaded();
+
+      var flows = <HttpRequest>[];
+      for (var i = 0; i < 2; i++) {
+        var request =
+            HttpRequest(HttpMethod.get, 'https://api.example.com/v1/items?n=$i&sign=abc$i');
+        request.headers.set('Content-Type', 'application/json');
+        flows.add(request);
+      }
+
+      var built = await DomainToolGenerator.build(flows, host: 'api.example.com');
+      expect(built.tools, isNotEmpty);
+      expect(built.warnings.any((w) => w.contains('"sign" looks like a signature')), isTrue);
+
+      // 发送层必须是原值：脱敏只能发生在回显
+      var prepared = DomainToolGenerator.prepareForTest(
+        flows,
+        host: 'api.example.com',
+        args: {'sign': 'xyz7'},
+      );
+      expect(prepared['url'], contains('sign=xyz7'));
+      expect(prepared['url'], isNot(contains('redacted')));
+    } finally {
+      CryptoProfileStore.instance.fileProvider = null;
+      await dir.delete(recursive: true);
+    }
   });
 
   test('breakpoint timeout config normalizes and clamps values', () {

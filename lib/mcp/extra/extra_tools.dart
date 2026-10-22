@@ -399,7 +399,10 @@ class McpExtraTools {
           var host = args['host']?.toString().trim();
           var prefix = args['prefix']?.toString().trim();
           if (!all && (host == null || host.isEmpty) && (prefix == null || prefix.isEmpty)) {
-            throw ToolException('Specify host, prefix, or all=true');
+            throw ToolException(
+                'Specify one of: host=<domain used at generation>, prefix=<tool-name prefix>, '
+                'or all=true to remove every generated tool. '
+                'Call list_domain_tools first to inspect what is currently registered.');
           }
 
           var server = McpService.instance.server;
